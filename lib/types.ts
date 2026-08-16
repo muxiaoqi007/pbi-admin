@@ -200,6 +200,13 @@ export interface PbiRefreshable {
   }
 }
 
+/** 报表页面 */
+export interface PbiReportPage {
+  name?: string
+  displayName?: string
+  order?: number
+}
+
 /** 前端展示用的扁平化视图 */
 export interface WorkspaceView {
   id: string

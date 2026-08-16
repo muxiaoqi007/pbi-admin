@@ -9,6 +9,7 @@ import type {
   PbiRefresh,
   PbiRefreshable,
   PbiRefreshSchedule,
+  PbiReportPage,
   PbiTable,
   PbiWorkspace,
   PbiWorkspaceUser,
@@ -234,6 +235,22 @@ export async function getReportUsers(reportId: string): Promise<PbiAdminUser[]> 
     )
   }
   const data = await pbiJson<{ value: PbiAdminUser[] }>(`/admin/reports/${reportId}/users`)
+  return data.value ?? []
+}
+
+/** 数据集权限用户（成员模式可用：/groups/{wid}/datasets/{did}/users） */
+export async function getDatasetUsers(workspaceId: string, datasetId: string): Promise<PbiAdminUser[]> {
+  const data = await pbiJson<{ value: PbiAdminUser[] }>(
+    `/groups/${workspaceId}/datasets/${datasetId}/users`,
+  )
+  return data.value ?? []
+}
+
+/** 报表页面清单（成员模式可用：/groups/{wid}/reports/{rid}/pages） */
+export async function getReportPages(workspaceId: string, reportId: string): Promise<PbiReportPage[]> {
+  const data = await pbiJson<{ value: PbiReportPage[] }>(
+    `/groups/${workspaceId}/reports/${reportId}/pages`,
+  )
   return data.value ?? []
 }
 

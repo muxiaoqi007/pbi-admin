@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Button, Drawer, Input, Space, Table, Typography } from 'antd'
+import { Button, Drawer, Input, Modal, Space, Table, Typography } from 'antd'
 import { DownloadOutlined, ExportOutlined, SearchOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
@@ -10,12 +10,13 @@ import ErrorAlert from '@/components/ErrorAlert'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
-import type { PbiAdminUser, ReportView, TenantSnapshot } from '@/lib/types'
+import type { PbiAdminUser, PbiReportPage, ReportView, TenantSnapshot } from '@/lib/types'
 
 export default function ReportsPage() {
   const [keyword, setKeyword] = useState('')
   const [usersReport, setUsersReport] = useState<ReportView | null>(null)
   const [datasourceReport, setDatasourceReport] = useState<ReportView | null>(null)
+  const [pagesReport, setPagesReport] = useState<ReportView | null>(null)
 
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
@@ -43,6 +44,13 @@ export default function ReportsPage() {
   const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
     users: PbiAdminUser[]
   }>(usersReport ? `/api/reports/${usersReport.id}/users` : null, fetcher)
+
+  const { data: pagesData, error: pagesError, isLoading: pagesLoading } = useSWR<{
+    pages: PbiReportPage[]
+  }>(
+    pagesReport ? `/api/reports/pages?wid=${pagesReport.workspaceId}&rid=${pagesReport.id}` : null,
+    fetcher,
+  )
 
   const datasourceDataset = useMemo(
     () => data?.datasets.find((d) => d.id === datasourceReport?.datasetId),
@@ -104,10 +112,11 @@ export default function ReportsPage() {
           },
           {
             title: '操作',
-            width: 220,
+            width: 260,
             render: (_: unknown, r) => (
-              <Space size={12}>
+              <Space size={10}>
                 <a onClick={() => setUsersReport(r)}>用户</a>
+                <a onClick={() => setPagesReport(r)}>页面</a>
                 <a onClick={() => setDatasourceReport(r)}>数据源</a>
                 {r.webUrl && (
                   <Typography.Link href={r.webUrl} target="_blank">
@@ -139,6 +148,32 @@ export default function ReportsPage() {
         datasetName={datasourceDataset?.name ?? datasourceReport?.datasetId ?? '（报表未绑定数据集）'}
         workspaceId={datasourceDataset?.workspaceId ?? datasourceReport?.workspaceId}
       />
+
+      <Modal
+        open={!!pagesReport}
+        onCancel={() => setPagesReport(null)}
+        footer={null}
+        width={620}
+        title={`报表页面 — ${pagesReport?.name ?? ''}（共 ${pagesData?.pages?.length ?? 0} 页）`}
+      >
+        {pagesError && <ErrorAlert error={pagesError} />}
+        <Table
+          rowKey={(p, i) => `${p.name ?? i}`}
+          size="small"
+          loading={pagesLoading}
+          dataSource={pagesData?.pages ?? []}
+          pagination={false}
+          columns={[
+            { title: '序号', dataIndex: 'order', width: 60, render: (v?: number) => v ?? '-' },
+            {
+              title: '页面名称',
+              dataIndex: 'displayName',
+              ellipsis: true,
+              render: (v?: string) => v ?? '-',
+            },
+          ]}
+        />
+      </Modal>
     </div>
   )
 }

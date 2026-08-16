@@ -1,11 +1,12 @@
 'use client'
 
 import { Alert, Button, Card, Col, Row, Statistic, Table, Tag, Tooltip } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
 import { fetcher } from '@/lib/client'
+import { exportCSV } from '@/lib/export'
 import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
 
 export default function OverviewPage() {
@@ -18,6 +19,17 @@ export default function OverviewPage() {
   } = useSWR<TenantSnapshot>('/api/snapshot', fetcher, { keepPreviousData: true })
 
   const memberMode = snapshot?.mode === 'member'
+
+  function exportAll() {
+    if (!snapshot) return
+    const date = new Date().toISOString().slice(0, 10)
+    // Sheet 1: 数据集
+    exportCSV(`数据集清单_${date}.csv`, ['数据集', '工作区', '可刷新', '需要网关', '关联报表数', '配置者', '修改时间', 'ID'], snapshot.datasets.map((d) => [d.name, d.workspaceName, d.isRefreshable ? '是' : '否', d.isOnPremGatewayRequired ? '是' : '否', d.reportCount, d.configuredBy ?? '', d.modifiedDate ? dayjs(d.modifiedDate).format('YYYY-MM-DD HH:mm') : '', d.id]))
+    // Sheet 2: 报表（延迟一下避免浏览器同时下载两个文件被拦）
+    setTimeout(() => {
+      exportCSV(`报表清单_${date}.csv`, ['报表', '工作区', '数据集ID', '类型', '修改时间', '链接'], snapshot.reports.map((r) => [r.name, r.workspaceName, r.datasetId ?? '', r.reportType ?? '', r.modifiedDateTime ? dayjs(r.modifiedDateTime).format('YYYY-MM-DD HH:mm') : '', r.webUrl ?? '']))
+    }, 500)
+  }
   const { data: refreshablesData, error: refreshablesError } = useSWR<{
     refreshables: PbiRefreshable[]
   }>(memberMode ? null : '/api/refreshables', fetcher)
@@ -52,6 +64,9 @@ export default function OverviewPage() {
           onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
         >
           强制刷新
+        </Button>
+        <Button icon={<DownloadOutlined />} onClick={exportAll} disabled={!snapshot}>
+          全租户导出（数据集+报表）
         </Button>
       </div>
 

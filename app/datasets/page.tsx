@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { App, Button, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Drawer, Input, Modal, Space, Table, Tag, Typography } from 'antd'
 import { DownloadOutlined, ExportOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
@@ -9,9 +9,10 @@ import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
+import UsersTable from '@/components/UsersTable'
 import { fetcher, postJSON } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
-import type { DatasetView, TenantSnapshot } from '@/lib/types'
+import type { DatasetView, PbiAdminUser, TenantSnapshot } from '@/lib/types'
 
 interface BatchResult {
   total: number
@@ -26,6 +27,7 @@ export default function DatasetsPage() {
   const [reportsDataset, setReportsDataset] = useState<DatasetView | null>(null)
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
+  const [usersDataset, setUsersDataset] = useState<DatasetView | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
@@ -43,6 +45,13 @@ export default function DatasetsPage() {
       (d) => d.name.toLowerCase().includes(k) || d.workspaceName.toLowerCase().includes(k),
     )
   }, [data, keyword])
+
+  const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
+    users: PbiAdminUser[]
+  }>(
+    usersDataset ? `/api/datasets/users?wid=${usersDataset.workspaceId}&did=${usersDataset.id}` : null,
+    fetcher,
+  )
 
   const boundReports = useMemo(
     () => (data?.reports ?? []).filter((r) => r.datasetId === reportsDataset?.id),
@@ -167,10 +176,11 @@ export default function DatasetsPage() {
           },
           {
             title: '操作',
-            width: 250,
+            width: 300,
             fixed: 'right',
             render: (_: unknown, d) => (
-              <Space size={12} split={<span className="text-muted">·</span>}>
+              <Space size={10} split={<span className="text-muted">·</span>}>
+                <a onClick={() => setUsersDataset(d)}>用户</a>
                 <a onClick={() => setDatasourceDataset(d)}>数据源</a>
                 <a onClick={() => setReportsDataset(d)}>关联报表</a>
                 <a onClick={() => setHistoryDataset(d)}>刷新记录</a>
@@ -249,6 +259,15 @@ export default function DatasetsPage() {
         dataset={historyDataset}
         onClose={() => setHistoryDataset(null)}
       />
+      <Drawer
+        open={!!usersDataset}
+        onClose={() => setUsersDataset(null)}
+        width={680}
+        title={`数据集用户 — ${usersDataset?.name ?? ''}`}
+      >
+        {usersError && <ErrorAlert error={usersError} />}
+        <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
+      </Drawer>
       <RefreshModal
         open={!!refreshDataset}
         dataset={refreshDataset}
