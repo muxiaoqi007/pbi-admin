@@ -1,14 +1,15 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Drawer, Input, Space, Table, Typography } from 'antd'
-import { ExportOutlined, SearchOutlined } from '@ant-design/icons'
+import { Button, Drawer, Input, Space, Table, Typography } from 'antd'
+import { DownloadOutlined, ExportOutlined, SearchOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
+import { exportCSV } from '@/lib/export'
 import type { PbiAdminUser, ReportView, TenantSnapshot } from '@/lib/types'
 
 export default function ReportsPage() {
@@ -48,6 +49,20 @@ export default function ReportsPage() {
     [data, datasourceReport],
   )
 
+  function doExport() {
+    exportCSV(
+      `报表清单_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['报表', '工作区', '数据集', '修改时间', '链接'],
+      filtered.map((r) => [
+        r.name,
+        r.workspaceName,
+        (r.datasetId && datasetNameById.get(r.datasetId)) || '',
+        r.modifiedDateTime ? dayjs(r.modifiedDateTime).format('YYYY-MM-DD HH:mm') : '',
+        r.webUrl ?? '',
+      ]),
+    )
+  }
+
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
@@ -62,6 +77,9 @@ export default function ReportsPage() {
         />
         <span className="text-muted">共 {filtered.length} 张报表</span>
         {isValidating && data && <span className="text-muted">（正在刷新…）</span>}
+        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+          导出 CSV
+        </Button>
       </div>
       <Table<ReportView>
         rowKey={(r) => `${r.workspaceId}:${r.id}`}

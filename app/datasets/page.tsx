@@ -1,23 +1,34 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Input, Modal, Space, Table, Tag, Typography } from 'antd'
-import { ExportOutlined, SearchOutlined } from '@ant-design/icons'
+import { App, Button, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { DownloadOutlined, ExportOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
-import { fetcher } from '@/lib/client'
+import { fetcher, postJSON } from '@/lib/client'
+import { exportCSV } from '@/lib/export'
 import type { DatasetView, TenantSnapshot } from '@/lib/types'
 
+interface BatchResult {
+  total: number
+  success: number
+  failures: { name: string; error: string }[]
+}
+
 export default function DatasetsPage() {
+  const { message, modal } = App.useApp()
   const [keyword, setKeyword] = useState('')
   const [datasourceDataset, setDatasourceDataset] = useState<DatasetView | null>(null)
   const [reportsDataset, setReportsDataset] = useState<DatasetView | null>(null)
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
+  const [selected, setSelected] = useState<React.Key[]>([])
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
 
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
@@ -38,6 +49,55 @@ export default function DatasetsPage() {
     [data, reportsDataset],
   )
 
+  function doExport() {
+    exportCSV(
+      `数据集清单_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['数据集', '工作区', '可刷新', '需要网关', '关联报表数', '配置者', '修改时间', 'ID'],
+      filtered.map((d) => [
+        d.name,
+        d.workspaceName,
+        d.isRefreshable ? '是' : '否',
+        d.isOnPremGatewayRequired ? '是' : '否',
+        d.reportCount,
+        d.configuredBy ?? '',
+        d.modifiedDate ? dayjs(d.modifiedDate).format('YYYY-MM-DD HH:mm') : '',
+        d.id,
+      ]),
+    )
+  }
+
+  async function runBatchRefresh() {
+    const rows = filtered.filter((d) => selected.includes(d.id))
+    if (rows.length === 0) return
+    setBatchRunning(true)
+    setBatchResult(null)
+    try {
+      const res = await postJSON<BatchResult>('/api/refresh-batch', {
+        items: rows.map((d) => ({ workspaceId: d.workspaceId, datasetId: d.id, name: d.name })),
+      })
+      setBatchResult(res)
+      if (res.failures.length === 0) {
+        message.success(`${res.success}/${res.total} 个数据集刷新请求已提交`)
+      } else {
+        message.warning(`${res.success}/${res.total} 成功，${res.failures.length} 个失败，详见页面下方明细`)
+      }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBatchRunning(false)
+    }
+  }
+
+  function confirmBatch() {
+    modal.confirm({
+      title: `批量刷新 ${selected.length} 个数据集？`,
+      content:
+        '将依次对所选数据集触发全部刷新（并发 3 个，避免触发限流）。已有刷新排队中的数据集会被服务端拒绝，失败明细将在完成后展示。',
+      okText: '开始刷新',
+      onOk: runBatchRefresh,
+    })
+  }
+
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
@@ -52,19 +112,37 @@ export default function DatasetsPage() {
         />
         <span className="text-muted">共 {filtered.length} 个数据集</span>
         {isValidating && data && <span className="text-muted">（正在刷新…）</span>}
+        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+          导出 CSV
+        </Button>
+        <Button
+          type="primary"
+          ghost
+          icon={<SyncOutlined />}
+          disabled={selected.length === 0}
+          loading={batchRunning}
+          onClick={confirmBatch}
+        >
+          批量刷新{selected.length > 0 ? `（已选 ${selected.length} 个）` : ''}
+        </Button>
       </div>
       <Table<DatasetView>
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: setSelected,
+          getCheckboxProps: (d) => ({ disabled: !d.isRefreshable }),
+        }}
         pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
         columns={[
           { title: '数据集', dataIndex: 'name', ellipsis: true },
-          { title: '工作区', dataIndex: 'workspaceName', width: 170, ellipsis: true },
+          { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true },
           {
             title: '可刷新',
             dataIndex: 'isRefreshable',
-            width: 80,
+            width: 75,
             render: (v?: boolean) => (v ? <Tag color="green">是</Tag> : '-'),
           },
           {
@@ -73,16 +151,24 @@ export default function DatasetsPage() {
             width: 70,
             render: (v?: boolean) => (v ? <Tag color="orange">本地</Tag> : '云'),
           },
-          { title: '关联报表', dataIndex: 'reportCount', width: 90 },
+          { title: '关联报表', dataIndex: 'reportCount', width: 85 },
+          {
+            title: '配置者',
+            dataIndex: 'configuredBy',
+            width: 150,
+            ellipsis: true,
+            render: (v?: string) => v ?? '-',
+          },
           {
             title: '修改时间',
             dataIndex: 'modifiedDate',
-            width: 160,
+            width: 130,
             render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
           },
           {
             title: '操作',
-            width: 260,
+            width: 250,
+            fixed: 'right',
             render: (_: unknown, d) => (
               <Space size={12} split={<span className="text-muted">·</span>}>
                 <a onClick={() => setDatasourceDataset(d)}>数据源</a>
@@ -94,6 +180,30 @@ export default function DatasetsPage() {
           },
         ]}
       />
+
+      {batchResult && batchResult.failures.length > 0 && (
+        <Modal
+          open
+          footer={
+            <Button type="primary" onClick={() => setBatchResult(null)}>
+              知道了
+            </Button>
+          }
+          onCancel={() => setBatchResult(null)}
+          title={`批量刷新结果：成功 ${batchResult.success} / ${batchResult.total}`}
+        >
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {batchResult.failures.map((f) => (
+              <li key={f.name} style={{ marginBottom: 4 }}>
+                <Typography.Text strong>{f.name}</Typography.Text>
+                <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                  {f.error}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Modal>
+      )}
 
       <DatasourcesModal
         open={!!datasourceDataset}

@@ -1,13 +1,14 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Input, Table, Tag, Tooltip } from 'antd'
-import { SearchOutlined } from '@ant-design/icons'
+import { Button, Input, Table, Tag, Tooltip } from 'antd'
+import { DownloadOutlined, SearchOutlined } from '@ant-design/icons'
 import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
 import ErrorAlert from '@/components/ErrorAlert'
 import { accessRightOf } from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
+import { exportCSV } from '@/lib/export'
 import type { TenantSnapshot, WorkspaceView } from '@/lib/types'
 
 export default function WorkspacesPage() {
@@ -27,6 +28,27 @@ export default function WorkspacesPage() {
     )
   }, [data, keyword])
 
+  function doExport() {
+    exportCSV(
+      `工作区清单_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['名称', 'ID', '类型', '状态', '专用容量', '成员数', '报表数', '数据集数', '管理员'],
+      filtered.map((w) => [
+        w.name,
+        w.id,
+        w.type === 'Personal' ? '个人' : w.type === 'AdminWorkspace' ? '管理' : '工作区',
+        w.state ?? '',
+        w.isOnDedicatedCapacity ? '是' : '否',
+        w.users.length,
+        w.reportCount,
+        w.datasetCount,
+        w.users
+          .filter((u) => accessRightOf(u) === 'Admin')
+          .map((u) => u.displayName || u.email || u.identifier)
+          .join('、'),
+      ]),
+    )
+  }
+
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
@@ -40,6 +62,9 @@ export default function WorkspacesPage() {
           onChange={(e) => setKeyword(e.target.value)}
         />
         <span className="text-muted">共 {filtered.length} 个工作区</span>
+        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+          导出 CSV
+        </Button>
       </div>
       <Table<WorkspaceView>
         rowKey="id"
