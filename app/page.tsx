@@ -1,95 +1,154 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+'use client'
 
-export default function Home() {
+import { Alert, Button, Card, Col, Row, Statistic, Table, Tag, Tooltip } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import useSWR from 'swr'
+import dayjs from 'dayjs'
+import ErrorAlert from '@/components/ErrorAlert'
+import { fetcher } from '@/lib/client'
+import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
+
+export default function OverviewPage() {
+  const {
+    data: snapshot,
+    error,
+    isLoading,
+    mutate,
+    isValidating,
+  } = useSWR<TenantSnapshot>('/api/snapshot', fetcher, { keepPreviousData: true })
+
+  const memberMode = snapshot?.mode === 'member'
+  const { data: refreshablesData, error: refreshablesError } = useSWR<{
+    refreshables: PbiRefreshable[]
+  }>(memberMode ? null : '/api/refreshables', fetcher)
+
+  const memberCount = new Set(
+    (snapshot?.workspaces ?? []).flatMap((w) => w.users.map((u) => u.identifier)),
+  ).size
+
   return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+    <div>
+      {error && !snapshot && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {memberMode && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`成员模式：仅显示服务主体已加入的 ${snapshot.workspaces.length} 个工作区`}
+          description="当前云的管理 API 不支持服务主体身份（世纪互联即如此），已自动降级为成员模式。浏览、数据源、刷新记录、触发刷新均可正常使用；「报表级用户」与「全租户刷新状态」依赖管理 API，暂不可用。"
         />
-        <ol>
-          <li>
-            Get started by editing <code>app/page.tsx</code>.
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+      )}
+      <div className="table-toolbar">
+        <span className="text-muted">
+          {snapshot
+            ? `数据快照时间：${dayjs(snapshot.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}（缓存 5 分钟）`
+            : isLoading
+              ? '正在加载租户数据…'
+              : ''}
+        </span>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+        >
+          强制刷新
+        </Button>
+      </div>
 
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-            className={styles.secondary}
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className={styles.footer}>
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      <Row gutter={16}>
+        <Col span={6}>
+          <Card>
+            <Statistic title="工作区" value={snapshot?.workspaces.length ?? 0} loading={isLoading} />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic title="报表" value={snapshot?.reports.length ?? 0} loading={isLoading} />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic title="数据集" value={snapshot?.datasets.length ?? 0} loading={isLoading} />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic title="工作区成员（去重）" value={memberCount} loading={isLoading} />
+          </Card>
+        </Col>
+      </Row>
+
+      {!memberMode && (
+      <Card
+        title="最近刷新状态（全租户可刷新项）"
+        style={{ marginTop: 16 }}
+        extra={
+          refreshablesError ? (
+            <Tooltip title={String(refreshablesError.message ?? refreshablesError)}>
+              <Tag color="orange">不可用</Tag>
+            </Tooltip>
+          ) : null
+        }
+      >
+        <Table
+          rowKey={(r) => `${r.itemId ?? r.id ?? r.name}`}
+          size="small"
+          dataSource={refreshablesData?.refreshables ?? []}
+          pagination={{ pageSize: 10 }}
+          columns={[
+            { title: '名称', dataIndex: 'name', ellipsis: true },
+            {
+              title: '最近状态',
+              dataIndex: ['lastRefresh', 'status'],
+              width: 90,
+              render: (v?: string) =>
+                v === 'Completed' ? (
+                  <Tag color="green">成功</Tag>
+                ) : v === 'Failed' ? (
+                  <Tag color="red">失败</Tag>
+                ) : (
+                  <Tag>{v ?? '-'}</Tag>
+                ),
+            },
+            {
+              title: '最近刷新时间',
+              dataIndex: ['lastRefresh', 'startTime'],
+              width: 170,
+              render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
+            },
+            {
+              title: '刷新次数',
+              dataIndex: 'refreshCount',
+              width: 90,
+              render: (v?: number) => v ?? '-',
+            },
+            {
+              title: '错误',
+              ellipsis: { showTitle: false },
+              render: (_: unknown, r: PbiRefreshable) => {
+                const raw = r.lastRefresh?.serviceExceptionJson
+                if (!raw) return '-'
+                let msg = raw
+                try {
+                  msg = JSON.parse(raw).error?.message ?? raw
+                } catch {
+                  /* 保留原文 */
+                }
+                return (
+                  <Tooltip title={msg} placement="topLeft">
+                    <span className="text-error">{msg}</span>
+                  </Tooltip>
+                )
+              },
+            },
+          ]}
+        />
+      </Card>
+      )}
+
+      {!memberMode && !refreshablesData && !refreshablesError && (
+        <Alert type="info" showIcon message="正在加载刷新状态…" style={{ marginTop: 16 }} />
+      )}
     </div>
-  );
+  )
 }
