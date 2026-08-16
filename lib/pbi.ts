@@ -632,3 +632,75 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
   dsIndexCache = { at: Date.now(), data }
   return data
 }
+
+// ---------------------------------------------------------------------------
+// 刷新失败巡检：扫描可刷新数据集的最近记录，汇总失败项（成员模式可用）
+// ---------------------------------------------------------------------------
+
+export interface RefreshFailureItem {
+  datasetId: string
+  datasetName: string
+  workspaceName: string
+  workspaceId: string
+  startTime: string
+  endTime?: string
+  refreshType?: string
+  error?: string
+}
+
+const FAILURES_TTL_MS = 10 * 60 * 1000
+let failuresCache: { at: number; data: RefreshFailureItem[] } | null = null
+
+/** 解析 serviceExceptionJson：兼容 {errorCode, errorDescription} 和 {error:{message}} 两种格式 */
+function briefRefreshError(raw?: string): string {
+  if (!raw) return ''
+  try {
+    const j = JSON.parse(raw)
+    if (j.errorCode || j.errorDescription) {
+      return [j.errorCode, j.errorDescription].filter(Boolean).join('：')
+    }
+    return j.error?.message ?? j.message ?? raw
+  } catch {
+    return raw
+  }
+}
+
+export async function getRefreshFailures(force = false): Promise<RefreshFailureItem[]> {
+  if (!force && failuresCache && Date.now() - failuresCache.at < FAILURES_TTL_MS) {
+    return failuresCache.data
+  }
+  const snap = await getTenantSnapshot(force)
+  const targets = snap.datasets.filter((d) => d.isRefreshable)
+  const failures: RefreshFailureItem[] = []
+
+  const CONCURRENCY = 8
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    await Promise.allSettled(
+      targets.slice(i, i + CONCURRENCY).map(async (d) => {
+        try {
+          const history = await getRefreshHistory(d.workspaceId, d.id)
+          // 只看最近一次结果（跳过进行中的，取最近一条已完结的）
+          const last = history.find((r) => r.status !== 'InProgress' && r.status !== 'NotStarted')
+          if (last?.status === 'Failed') {
+            failures.push({
+              datasetId: d.id,
+              datasetName: d.name,
+              workspaceName: d.workspaceName,
+              workspaceId: d.workspaceId,
+              startTime: last.startTime,
+              endTime: last.endTime,
+              refreshType: last.refreshType,
+              error: briefRefreshError(last.serviceExceptionJson),
+            })
+          }
+        } catch {
+          /* 个别数据集刷新历史不可访问时跳过 */
+        }
+      }),
+    )
+  }
+
+  failures.sort((a, b) => (a.startTime < b.startTime ? 1 : -1))
+  failuresCache = { at: Date.now(), data: failures }
+  return failures
+}

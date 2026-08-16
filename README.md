@@ -70,6 +70,7 @@ docker run -d -p 3000:3000 \
 
 3. **添加 API 权限**（应用程序权限，非委托权限）：应用 → API 权限 → 添加权限 → **Power BI Service**（搜索不到时在「我的组织使用的 API」中搜索 Power BI）→ **Application permissions**，勾选：
    - `Workspace.ReadWrite.All`（工作区与成员管理）
+   - `WorkspaceInfo.ReadWrite.All`（工作区 Schema 扫描：表/列/度量值结构，选表刷新的表清单来源之一）
    - `Report.Read.All`（报表与报表用户）
    - `Dataset.ReadWrite.All`（数据集、数据源、刷新记录、触发刷新）
 
