@@ -57,7 +57,8 @@ async function pbiRequest(
     }
     break
   }
-  if (res.status === 401 && !init?.forceToken) {
+  // 401/403 且本次非强制刷新 token → 刷新 token 重试一次（Power BI token 过期可能返回 403）
+  if ((res.status === 401 || res.status === 403) && !init?.forceToken) {
     return pbiRequest(path, { ...init, forceToken: true })
   }
   return res
@@ -84,7 +85,12 @@ async function toPbiError(res: Response): Promise<PbiError> {
     /* 非 JSON 错误体，保留原文 */
   }
   if (res.status === 403) {
-    message = `无权限 (HTTP 403)：${message}。常见原因：租户设置未允许服务主体使用 Power BI API，或服务主体不在目标工作区内。`
+    // 区分 token 过期和真正的权限不足
+    if (/expired|access token/i.test(message)) {
+      message = `访问令牌已过期 (HTTP 403)。请重试；如反复出现请检查系统时间是否准确。`
+    } else {
+      message = `无权限 (HTTP 403)：${message}。常见原因：租户设置未允许服务主体使用 Power BI API，或服务主体不在目标工作区内。`
+    }
   }
   if (res.status === 401) {
     message = text.trim()

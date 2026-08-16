@@ -17,6 +17,7 @@ import {
 import useSWR from 'swr'
 import type { Dayjs } from 'dayjs'
 import { fetcher, postJSON } from '@/lib/client'
+import { getCachedTables, setCachedTables } from '@/lib/table-cache'
 import type { DatasetView, PbiTable } from '@/lib/types'
 
 export interface RefreshFormValues {
@@ -77,11 +78,38 @@ export default function RefreshModal({
     fetcher,
   )
 
-  const tables = data?.tables ?? []
+  // API 拿到表清单时自动缓存；拿不到时用本地缓存（上次手动输入过的表名）
+  const apiTables = data?.tables ?? []
+  const [manualTables, setManualTables] = useState<string[]>([])
+  const datasetId = dataset?.id
+
+  useEffect(() => {
+    if (datasetId && apiTables.length > 0) {
+      setCachedTables(datasetId, apiTables.map((t) => t.name))
+    }
+    if (open && datasetId) {
+      setManualTables(getCachedTables(datasetId))
+    } else {
+      setManualTables([])
+    }
+  }, [apiTables, datasetId, open])
+
+  // 合并：API 表清单优先，补充本地缓存的表名
+  const allTableNames = Array.from(
+    new Set([...apiTables.map((t) => t.name), ...manualTables]),
+  )
+  const tables: PbiTable[] = allTableNames.map((name) => ({
+    name,
+    isHidden: apiTables.find((t) => t.name === name)?.isHidden ?? false,
+  }))
 
   async function submit() {
     if (!dataset) return
     const values = await form.validateFields()
+    // 选表模式下把用户选的表名缓存，下次打开自动带出
+    if (values.mode === 'tables' && values.tables?.length) {
+      setCachedTables(dataset.id, values.tables)
+    }
     setSubmitting(true)
     try {
       await postJSON('/api/refresh', {
@@ -167,7 +195,14 @@ export default function RefreshModal({
                 showIcon
                 style={{ marginBottom: 16 }}
                 message="无法自动读取表清单"
-                description={String(error.message ?? error)}
+                description={
+                  <>
+                    <p style={{ margin: '4px 0' }}>{String(error.message ?? error)}</p>
+                    <p style={{ margin: '4px 0' }} className="text-muted">
+                      可直接在上方输入框手动输入表名后回车，输入过的表名会自动缓存，下次打开时自动带出。
+                    </p>
+                  </>
+                }
               />
             )}
           </>
