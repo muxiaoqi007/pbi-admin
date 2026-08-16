@@ -291,7 +291,10 @@ export async function getRefreshHistory(workspaceId: string, datasetId: string):
 
 /** 数据集表清单（服务主体需在工作区内）：
  *  1) REST /tables —— 仅推送数据集有效，普通语义模型返回 404
- *  2) 回退 executeQueries + DAX 目录查询 INFO.VIEW.TABLES()，适用普通语义模型 */
+ *  2) 回退 executeQueries + DAX 目录查询 INFO.VIEW.TABLES()，适用普通语义模型
+ *  注意：executeQueries 要求调用者对该数据集有 Build（重新生成）权限，
+ *  工作区成员不够，需要在数据集的「使用权限」里单独给服务主体授权，
+ *  否则返回 401 PowerBINotAuthorizedException */
 export async function getDatasetTables(workspaceId: string, datasetId: string): Promise<PbiTable[]> {
   try {
     const data = await pbiJson<{ value: PbiTable[] }>(
@@ -302,21 +305,32 @@ export async function getDatasetTables(workspaceId: string, datasetId: string): 
     if (!(e instanceof PbiError) || ![400, 404].includes(e.status)) throw e
   }
 
-  const data = await pbiJson<{
-    results?: { tables?: { rows?: Record<string, unknown>[] }[] }[]
-  }>(`/groups/${workspaceId}/datasets/${datasetId}/executeQueries`, {
-    method: 'POST',
-    body: JSON.stringify({
-      queries: [{ query: 'EVALUATE TOPN(500, INFO.VIEW.TABLES())' }],
-    }),
-  })
-  const rows = data.results?.[0]?.tables?.[0]?.rows ?? []
-  return rows
-    .map((r) => ({
-      name: String(r['[Name]'] ?? ''),
-      isHidden: Boolean(r['[IsHidden]']),
-    }))
-    .filter((t) => t.name)
+  try {
+    const data = await pbiJson<{
+      results?: { tables?: { rows?: Record<string, unknown>[] }[] }[]
+    }>(`/groups/${workspaceId}/datasets/${datasetId}/executeQueries`, {
+      method: 'POST',
+      body: JSON.stringify({
+        queries: [{ query: 'EVALUATE TOPN(500, INFO.VIEW.TABLES())' }],
+      }),
+    })
+    const rows = data.results?.[0]?.tables?.[0]?.rows ?? []
+    return rows
+      .map((r) => ({
+        name: String(r['[Name]'] ?? ''),
+        isHidden: Boolean(r['[IsHidden]']),
+      }))
+      .filter((t) => t.name)
+  } catch (e) {
+    if (e instanceof PbiError && (e.status === 401 || e.status === 403)) {
+      throw new PbiError(
+        e.status,
+        '无法读取表清单：该数据集未授予服务主体 Build（重新生成）权限。executeQueries 需要"使用 + 重新生成"权限，工作区成员权限不够。请在 Power BI 服务的「数据集 → 权限」或「语义模型 → 使用权限」中给服务主体添加 Build 权限；或先手动输入表名（见下）。',
+        e.code,
+      )
+    }
+    throw e
+  }
 }
 
 export async function getRefreshables(): Promise<PbiRefreshable[]> {
