@@ -2,21 +2,14 @@
 
 export type CloudEnv = 'global' | 'china'
 
-export interface AppConfig {
+/** 认证地址 / API 地址 / resource 都已解析完毕的运行时配置（来自激活的租户环境） */
+export interface RuntimeConfig {
+  envId: string
+  envName: string
   cloud: CloudEnv
   tenantId: string
   clientId: string
   clientSecret: string
-  /** 覆盖默认的认证地址（如世纪互联 authority 迁移时） */
-  authorityOverride?: string
-  /** 覆盖默认的 API 基地址 */
-  apiBaseOverride?: string
-  /** 覆盖默认的 token resource（v1 认证流） */
-  resourceOverride?: string
-}
-
-/** 认证地址 / API 地址 / resource 都已解析完毕的运行时配置 */
-export interface RuntimeConfig extends AppConfig {
   authority: string
   apiBase: string
   resource: string

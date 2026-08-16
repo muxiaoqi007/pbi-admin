@@ -8,6 +8,7 @@ import {
   ConfigProvider,
   Layout,
   Menu,
+  Select,
   theme,
 } from 'antd'
 import {
@@ -19,9 +20,12 @@ import {
   SettingOutlined,
   ToolOutlined,
 } from '@ant-design/icons'
+import useSWR from 'swr'
 import zhCN from 'antd/locale/zh_CN'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
+import { fetcher, postJSON } from '@/lib/client'
+import type { CloudEnv } from '@/lib/types'
 
 dayjs.locale('zh-cn')
 
@@ -41,6 +45,23 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
+
+  const { data: configData } = useSWR<{
+    activeEnvId?: string
+    environments: { id: string; name: string; cloud: CloudEnv }[]
+  }>(pathname === '/settings' ? null : '/api/config', fetcher)
+  const envs = configData?.environments ?? []
+  const activeEnvId = configData?.activeEnvId
+
+  async function switchEnv(id: string) {
+    if (id === activeEnvId) return
+    try {
+      await postJSON('/api/config', { action: 'activate', id })
+      window.location.reload()
+    } catch {
+      /* 切换失败时静默 */
+    }
+  }
 
   const selectedKey =
     MENU_ITEMS.map((i) => i.key)
@@ -72,6 +93,20 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
             <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12 }}>
               国际版 / 世纪互联
             </span>
+            <div style={{ flex: 1 }} />
+            {envs.length > 1 && (
+              <Select
+                size="small"
+                value={activeEnvId}
+                onChange={switchEnv}
+                style={{ width: 200 }}
+                popupMatchSelectWidth={false}
+                options={envs.map((e) => ({
+                  value: e.id,
+                  label: `${e.name}（${e.cloud === 'china' ? '世纪互联' : '国际版'}）`,
+                }))}
+              />
+            )}
           </Header>
           <Layout>
             <Sider

@@ -1,35 +1,75 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { invalidateToken } from '@/lib/auth'
-import { isCloudEnv } from '@/lib/cloud'
-import { loadConfig, maskConfig, saveConfig } from '@/lib/config'
 import { fail } from '@/lib/api'
+import {
+  deleteEnvironment,
+  listEnvironments,
+  maskEnvironment,
+  saveEnvironment,
+  setActiveEnvironment,
+  type Environment,
+} from '@/lib/config'
 
 export const dynamic = 'force-dynamic'
 
+/** GET：环境列表（脱敏）+ 激活环境 ID */
 export async function GET() {
   try {
-    const cfg = await loadConfig()
-    return NextResponse.json({ config: maskConfig(cfg) })
+    const { environments, activeEnvId } = listEnvironments()
+    return NextResponse.json({
+      activeEnvId,
+      environments: environments.map(maskEnvironment),
+      activeEnv: environments.find((e) => e.id === activeEnvId)
+        ? maskEnvironment(environments.find((e) => e.id === activeEnvId)!)
+        : null,
+    })
   } catch (e) {
     return fail(e)
   }
 }
 
+/** POST：{action: 'save'|'activate'|'delete', env?, id?, activate?} */
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as Record<string, unknown>
-    await saveConfig({
-      cloud: isCloudEnv(body.cloud) ? body.cloud : undefined,
-      tenantId: typeof body.tenantId === 'string' ? body.tenantId : undefined,
-      clientId: typeof body.clientId === 'string' ? body.clientId : undefined,
-      clientSecret: typeof body.clientSecret === 'string' ? body.clientSecret : undefined,
-      authorityOverride: typeof body.authorityOverride === 'string' ? body.authorityOverride : undefined,
-      apiBaseOverride: typeof body.apiBaseOverride === 'string' ? body.apiBaseOverride : undefined,
-      resourceOverride: typeof body.resourceOverride === 'string' ? body.resourceOverride : undefined,
+    const body = (await req.json()) as {
+      action?: string
+      env?: Partial<Environment> & { id?: string }
+      id?: string
+      activate?: boolean
+    }
+    switch (body.action) {
+      case 'save': {
+        const saved = saveEnvironment(body.env ?? {})
+        if (body.activate !== false) {
+          setActiveEnvironment(saved.id)
+        }
+        invalidateToken()
+        break
+      }
+      case 'activate': {
+        if (!body.id || !setActiveEnvironment(body.id)) {
+          return NextResponse.json({ error: '环境不存在' }, { status: 404 })
+        }
+        invalidateToken()
+        break
+      }
+      case 'delete': {
+        if (body.id) deleteEnvironment(body.id)
+        invalidateToken()
+        break
+      }
+      default:
+        return NextResponse.json({ error: '未知操作' }, { status: 400 })
+    }
+    const { environments, activeEnvId } = listEnvironments()
+    return NextResponse.json({
+      ok: true,
+      activeEnvId,
+      environments: environments.map(maskEnvironment),
+      activeEnv: environments.find((e) => e.id === activeEnvId)
+        ? maskEnvironment(environments.find((e) => e.id === activeEnvId)!)
+        : null,
     })
-    invalidateToken()
-    const cfg = await loadConfig()
-    return NextResponse.json({ ok: true, config: maskConfig(cfg) })
   } catch (e) {
     return fail(e)
   }

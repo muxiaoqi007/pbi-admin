@@ -1,15 +1,40 @@
 import fs from 'fs'
 import path from 'path'
 import { CLOUD_PRESETS, isCloudEnv } from './cloud'
-import type { AppConfig, RuntimeConfig } from './types'
+import type { CloudEnv, RuntimeConfig } from './types'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json')
 
-/** 环境变量提供默认值，config.json 的保存值优先 */
-function fromEnv(): AppConfig {
+/** 一个租户环境 = 一套云端 + 租户 + 服务主体凭据 */
+export interface Environment {
+  id: string
+  name: string
+  cloud: CloudEnv
+  tenantId: string
+  clientId: string
+  clientSecret: string
+  authorityOverride?: string
+  apiBaseOverride?: string
+  resourceOverride?: string
+}
+
+interface ConfigFile {
+  version: 2
+  activeEnvId?: string
+  environments: Environment[]
+}
+
+function newId(): string {
+  return `env-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** 环境变量兜底环境（未保存到文件，作为初始默认值） */
+function envFromEnvVars(): Environment {
   const cloud = process.env.PBI_CLOUD
   return {
+    id: 'env-from-env',
+    name: '环境变量默认',
     cloud: isCloudEnv(cloud) ? cloud : 'global',
     tenantId: process.env.PBI_TENANT_ID ?? '',
     clientId: process.env.PBI_CLIENT_ID ?? '',
@@ -17,53 +42,127 @@ function fromEnv(): AppConfig {
   }
 }
 
-export async function loadConfig(): Promise<AppConfig> {
-  const env = fromEnv()
+function readConfigFile(): ConfigFile {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      const saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as Partial<AppConfig>
-      return {
-        cloud: isCloudEnv(saved.cloud) ? saved.cloud : env.cloud,
-        tenantId: saved.tenantId || env.tenantId,
-        clientId: saved.clientId || env.clientId,
-        clientSecret: saved.clientSecret || env.clientSecret,
-        authorityOverride: saved.authorityOverride || undefined,
-        apiBaseOverride: saved.apiBaseOverride || undefined,
-        resourceOverride: saved.resourceOverride || undefined,
+      const saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as Record<string, unknown>
+      if (saved && Array.isArray(saved.environments)) {
+        return {
+          version: 2,
+          activeEnvId: typeof saved.activeEnvId === 'string' ? saved.activeEnvId : undefined,
+          environments: saved.environments as Environment[],
+        }
+      }
+      // v1 扁平格式 → 自动迁移为单环境
+      if (saved && typeof saved === 'object' && 'tenantId' in saved) {
+        const env: Environment = {
+          id: newId(),
+          name: '默认环境',
+          cloud: isCloudEnv(saved.cloud) ? saved.cloud : 'global',
+          tenantId: String(saved.tenantId ?? ''),
+          clientId: String(saved.clientId ?? ''),
+          clientSecret: String(saved.clientSecret ?? ''),
+          authorityOverride: saved.authorityOverride ? String(saved.authorityOverride) : undefined,
+          apiBaseOverride: saved.apiBaseOverride ? String(saved.apiBaseOverride) : undefined,
+          resourceOverride: saved.resourceOverride ? String(saved.resourceOverride) : undefined,
+        }
+        const cfg: ConfigFile = { version: 2, activeEnvId: env.id, environments: [env] }
+        writeConfigFile(cfg)
+        return cfg
       }
     }
   } catch {
-    // 配置文件损坏时回退到环境变量
+    /* 配置文件损坏时视为空配置 */
   }
+  return { version: 2, environments: [] }
+}
+
+function writeConfigFile(cfg: ConfigFile) {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8')
+}
+
+export function listEnvironments(): { environments: Environment[]; activeEnvId?: string } {
+  const cfg = readConfigFile()
+  if (cfg.environments.length === 0) {
+    const env = envFromEnvVars()
+    if (env.tenantId && env.clientId && env.clientSecret) {
+      return { environments: [env], activeEnvId: env.id }
+    }
+  }
+  if (cfg.environments.length > 0 && !cfg.environments.some((e) => e.id === cfg.activeEnvId)) {
+    cfg.activeEnvId = cfg.environments[0].id
+  }
+  return { environments: cfg.environments, activeEnvId: cfg.activeEnvId }
+}
+
+export function getActiveEnvironment(): Environment | null {
+  const { environments, activeEnvId } = listEnvironments()
+  return environments.find((e) => e.id === activeEnvId) ?? environments[0] ?? null
+}
+
+/** 新建或更新环境（有 id 且存在则更新，否则新建）；secret 留空沿用旧值 */
+export function saveEnvironment(input: Partial<Environment> & { id?: string }): Environment {
+  const cfg = readConfigFile()
+  let env = input.id ? cfg.environments.find((e) => e.id === input.id) : undefined
+  if (env) {
+    env.name = (input.name ?? env.name).trim() || env.name
+    if (isCloudEnv(input.cloud)) env.cloud = input.cloud
+    env.tenantId = (input.tenantId ?? env.tenantId).trim()
+    env.clientId = (input.clientId ?? env.clientId).trim()
+    env.clientSecret = (input.clientSecret && input.clientSecret.trim()) || env.clientSecret
+    env.authorityOverride = input.authorityOverride?.trim() || undefined
+    env.apiBaseOverride = input.apiBaseOverride?.trim() || undefined
+    env.resourceOverride = input.resourceOverride?.trim() || undefined
+  } else {
+    env = {
+      id: input.id || newId(),
+      name: (input.name ?? '').trim() || '未命名环境',
+      cloud: isCloudEnv(input.cloud) ? input.cloud : 'global',
+      tenantId: (input.tenantId ?? '').trim(),
+      clientId: (input.clientId ?? '').trim(),
+      clientSecret: (input.clientSecret ?? '').trim(),
+      authorityOverride: input.authorityOverride?.trim() || undefined,
+      apiBaseOverride: input.apiBaseOverride?.trim() || undefined,
+      resourceOverride: input.resourceOverride?.trim() || undefined,
+    }
+    cfg.environments.push(env)
+  }
+  writeConfigFile(cfg)
   return env
 }
 
-export async function saveConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
-  const current = await loadConfig()
-  const next: AppConfig = {
-    cloud: isCloudEnv(patch.cloud) ? patch.cloud : current.cloud,
-    tenantId: (patch.tenantId ?? current.tenantId).trim(),
-    clientId: (patch.clientId ?? current.clientId).trim(),
-    // 密钥留空表示沿用旧值（前端不回显完整密钥）
-    clientSecret: (patch.clientSecret && patch.clientSecret.trim()) || current.clientSecret,
-    authorityOverride: patch.authorityOverride?.trim() || undefined,
-    apiBaseOverride: patch.apiBaseOverride?.trim() || undefined,
-    resourceOverride: patch.resourceOverride?.trim() || undefined,
+export function deleteEnvironment(id: string): void {
+  const cfg = readConfigFile()
+  cfg.environments = cfg.environments.filter((e) => e.id !== id)
+  if (cfg.activeEnvId === id) {
+    cfg.activeEnvId = cfg.environments[0]?.id
   }
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), 'utf-8')
-  return next
+  writeConfigFile(cfg)
 }
 
-/** 解析运行时配置：云预置端点 + 覆盖项 */
+export function setActiveEnvironment(id: string): boolean {
+  const cfg = readConfigFile()
+  if (!cfg.environments.some((e) => e.id === id)) return false
+  cfg.activeEnvId = id
+  writeConfigFile(cfg)
+  return true
+}
+
+/** 解析运行时配置：激活环境 + 云预置端点 + 覆盖项 */
 export async function resolveRuntime(): Promise<RuntimeConfig> {
-  const cfg = await loadConfig()
-  const preset = CLOUD_PRESETS[cfg.cloud]
+  const env = getActiveEnvironment()
+  const preset = env ? CLOUD_PRESETS[env.cloud] : CLOUD_PRESETS.global
   return {
-    ...cfg,
-    authority: cfg.authorityOverride?.replace(/\/+$/, '') || preset.authority,
-    apiBase: cfg.apiBaseOverride?.replace(/\/+$/, '') || preset.apiBase,
-    resource: cfg.resourceOverride || preset.resource,
+    envId: env?.id ?? '',
+    envName: env?.name ?? '',
+    cloud: env?.cloud ?? 'global',
+    tenantId: env?.tenantId ?? '',
+    clientId: env?.clientId ?? '',
+    clientSecret: env?.clientSecret ?? '',
+    authority: env?.authorityOverride?.replace(/\/+$/, '') || preset.authority,
+    apiBase: env?.apiBaseOverride?.replace(/\/+$/, '') || preset.apiBase,
+    resource: env?.resourceOverride || preset.resource,
   }
 }
 
@@ -72,17 +171,19 @@ export function configReady(cfg: RuntimeConfig): boolean {
   return Boolean(cfg.tenantId && cfg.clientId && cfg.clientSecret)
 }
 
-/** 返回给前端的配置（密钥脱敏） */
-export function maskConfig(cfg: AppConfig) {
-  const secretLen = cfg.clientSecret.length
+/** 返回给前端的环境信息（密钥脱敏） */
+export function maskEnvironment(e: Environment) {
+  const secretLen = e.clientSecret.length
   return {
-    cloud: cfg.cloud,
-    tenantId: cfg.tenantId,
-    clientId: cfg.clientId,
-    authorityOverride: cfg.authorityOverride ?? '',
-    apiBaseOverride: cfg.apiBaseOverride ?? '',
-    resourceOverride: cfg.resourceOverride ?? '',
+    id: e.id,
+    name: e.name,
+    cloud: e.cloud,
+    tenantId: e.tenantId,
+    clientId: e.clientId,
+    authorityOverride: e.authorityOverride ?? '',
+    apiBaseOverride: e.apiBaseOverride ?? '',
+    resourceOverride: e.resourceOverride ?? '',
     hasSecret: secretLen > 0,
-    secretPreview: secretLen > 0 ? `••••${cfg.clientSecret.slice(-4)}` : '',
+    secretPreview: secretLen > 0 ? `••••${e.clientSecret.slice(-4)}` : '',
   }
 }

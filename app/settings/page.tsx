@@ -10,26 +10,36 @@ import {
   Descriptions,
   Form,
   Input,
+  List,
+  Popconfirm,
   Radio,
   Space,
+  Tag,
   Typography,
 } from 'antd'
+import { CheckCircleOutlined, PlusOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import { fetcher, postJSON } from '@/lib/client'
 import { CLOUD_PRESETS } from '@/lib/cloud'
 import type { CloudEnv } from '@/lib/types'
 
+interface MaskedEnv {
+  id: string
+  name: string
+  cloud: CloudEnv
+  tenantId: string
+  clientId: string
+  authorityOverride: string
+  apiBaseOverride: string
+  resourceOverride: string
+  hasSecret: boolean
+  secretPreview: string
+}
+
 interface ConfigResponse {
-  config: {
-    cloud: CloudEnv
-    tenantId: string
-    clientId: string
-    authorityOverride: string
-    apiBaseOverride: string
-    resourceOverride: string
-    hasSecret: boolean
-    secretPreview: string
-  }
+  activeEnvId?: string
+  environments: MaskedEnv[]
+  activeEnv: MaskedEnv | null
 }
 
 interface TestResult {
@@ -42,43 +52,95 @@ interface TestResult {
   fetchedAt: string
 }
 
+interface FormValues {
+  name: string
+  cloud: CloudEnv
+  tenantId: string
+  clientId: string
+  clientSecret: string
+  authorityOverride: string
+  apiBaseOverride: string
+  resourceOverride: string
+}
+
 export default function SettingsPage() {
   const { message } = App.useApp()
-  const [form] = Form.useForm()
+  const [form] = Form.useForm<FormValues>()
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
 
   const { data, mutate } = useSWR<ConfigResponse>('/api/config', fetcher)
-  const cloudWatch = Form.useWatch('cloud', form) as CloudEnv | undefined
-  const cloud: CloudEnv = cloudWatch ?? data?.config.cloud ?? 'global'
-  const preset = CLOUD_PRESETS[cloud]
+  const environments = data?.environments ?? []
+  const activeEnvId = data?.activeEnvId
+
+  const selectedEnv = environments.find((e) => e.id === selectedId) ?? null
+  const isNew = selectedId === 'new'
+  const cloud = Form.useWatch('cloud', form) ?? selectedEnv?.cloud ?? 'global'
+  const preset = CLOUD_PRESETS[cloud as CloudEnv] ?? CLOUD_PRESETS.global
 
   useEffect(() => {
-    if (data?.config) {
-      const c = data.config
-      form.setFieldsValue({
-        cloud: c.cloud,
-        tenantId: c.tenantId,
-        clientId: c.clientId,
-        clientSecret: '',
-        authorityOverride: c.authorityOverride,
-        apiBaseOverride: c.apiBaseOverride,
-        resourceOverride: c.resourceOverride,
-      })
-    }
-  }, [data, form])
-
-  async function save() {
-    const values = await form.validateFields()
-    setSaving(true)
-    try {
-      await postJSON('/api/config', values)
-      await mutate()
+    if (selectedId && data) {
+      if (selectedId === 'new') {
+        form.setFieldsValue({
+          name: '',
+          cloud: 'china',
+          tenantId: '',
+          clientId: '',
+          clientSecret: '',
+          authorityOverride: '',
+          apiBaseOverride: '',
+          resourceOverride: '',
+        })
+      } else {
+        const env = environments.find((e) => e.id === selectedId)
+        if (env) {
+          form.setFieldsValue({
+            name: env.name,
+            cloud: env.cloud,
+            tenantId: env.tenantId,
+            clientId: env.clientId,
+            clientSecret: '',
+            authorityOverride: env.authorityOverride,
+            apiBaseOverride: env.apiBaseOverride,
+            resourceOverride: env.resourceOverride,
+          })
+        }
+      }
       setTestResult(null)
       setTestError(null)
-      message.success('配置已保存')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, data])
+
+  async function persist(thenTest: boolean) {
+    const values = await form.validateFields()
+    if (!thenTest && isNew && !values.clientSecret && !testResult) {
+      // 新建环境必须提供密钥
+    }
+    setSaving(true)
+    try {
+      await postJSON('/api/config', {
+        action: 'save',
+        env: { ...values, id: isNew ? undefined : selectedId },
+      })
+      await mutate()
+      message.success('环境已保存并设为当前使用')
+      setTestResult(null)
+      setTestError(null)
+      if (thenTest) {
+        setTesting(true)
+        try {
+          const result = await postJSON<TestResult>('/api/test')
+          setTestResult(result)
+        } catch (e) {
+          setTestError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setTesting(false)
+        }
+      }
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
     } finally {
@@ -86,162 +148,220 @@ export default function SettingsPage() {
     }
   }
 
-  async function test() {
-    const values = await form.validateFields()
-    setSaving(true)
+  async function activate(id: string) {
     try {
-      await postJSON('/api/config', values)
+      await postJSON('/api/config', { action: 'activate', id })
       await mutate()
-      message.success('配置已保存，开始测试连接…')
+      message.success('已切换当前环境')
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
-      setSaving(false)
-      return
     }
-    setSaving(false)
+  }
 
-    setTesting(true)
-    setTestResult(null)
-    setTestError(null)
+  async function remove(id: string) {
     try {
-      const result = await postJSON<TestResult>('/api/test')
-      setTestResult(result)
+      await postJSON('/api/config', { action: 'delete', id })
+      await mutate()
+      if (selectedId === id) setSelectedId(null)
+      message.success('环境已删除')
     } catch (e) {
-      setTestError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setTesting(false)
+      message.error(e instanceof Error ? e.message : String(e))
     }
   }
 
   return (
-    <Card title="连接设置" style={{ maxWidth: 780 }}>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="先在对应云的应用注册门户创建应用并获得管理员同意，详见 README 中的《应用注册步骤》。"
-        description={
-          <span>
-            当前云的应用注册门户：
-            <Typography.Link href={preset.portal} target="_blank">
-              {preset.portal}
-            </Typography.Link>
-            ｜Power BI 服务：
-            <Typography.Link href={preset.serviceUrl} target="_blank">
-              {preset.serviceUrl}
-            </Typography.Link>
-          </span>
+    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+      <Card
+        title="租户环境"
+        style={{ width: 320 }}
+        extra={
+          <Button
+            size="small"
+            icon={<PlusOutlined />}
+            onClick={() => setSelectedId('new')}
+            type={isNew ? 'primary' : 'default'}
+          >
+            新建
+          </Button>
         }
-      />
-
-      <Form form={form} layout="vertical">
-        <Form.Item name="cloud" label="云环境" rules={[{ required: true }]}>
-          <Radio.Group
-            optionType="button"
-            buttonStyle="solid"
-            onChange={() => {
-              setTestResult(null)
-              setTestError(null)
-            }}
-          >
-            <Radio.Button value="global">国际版</Radio.Button>
-            <Radio.Button value="china">世纪互联</Radio.Button>
-          </Radio.Group>
-        </Form.Item>
-
-        <Space size="large" style={{ display: 'flex' }}>
-          <Form.Item
-            name="tenantId"
-            label="租户 ID（或租户域名 xxx.partner.onmschina.cn / xxx.onmicrosoft.com）"
-            rules={[{ required: true, message: '请填写租户 ID' }]}
-            style={{ minWidth: 420 }}
-          >
-            <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
-          </Form.Item>
-        </Space>
-
-        <Form.Item
-          name="clientId"
-          label="客户端 ID（应用程序 ID）"
-          rules={[{ required: true, message: '请填写客户端 ID' }]}
-        >
-          <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
-        </Form.Item>
-
-        <Form.Item
-          name="clientSecret"
-          label={`客户端密钥${data?.config.hasSecret ? `（已保存 ${data.config.secretPreview}，留空表示不修改）` : ''}`}
-          rules={[{ required: !data?.config.hasSecret, message: '请填写客户端密钥' }]}
-        >
-          <Input.Password placeholder={data?.config.hasSecret ? '留空保持不变' : '应用注册中创建的密钥值'} />
-        </Form.Item>
-
-        <Collapse
-          ghost
-          items={[
-            {
-              key: 'advanced',
-              label: '高级设置（端点覆盖，一般留空）',
-              children: (
-                <>
-                  <Form.Item name="authorityOverride" label="认证地址 Authority" initialValue="">
-                    <Input placeholder={`默认 ${preset.authority}`} />
-                  </Form.Item>
-                  <Form.Item name="apiBaseOverride" label="API 基地址" initialValue="">
-                    <Input placeholder={`默认 ${preset.apiBase}`} />
-                  </Form.Item>
-                  <Form.Item name="resourceOverride" label="Token Resource" initialValue="">
-                    <Input placeholder={`默认 ${preset.resource}`} />
-                  </Form.Item>
-                </>
-              ),
-            },
-          ]}
+      >
+        <List
+          dataSource={environments}
+          locale={{ emptyText: '暂无环境，点右上角新建' }}
+          renderItem={(env) => (
+            <List.Item
+              style={{
+                cursor: 'pointer',
+                padding: '10px 8px',
+                borderRadius: 8,
+                background: selectedId === env.id ? 'rgba(232,173,3,0.08)' : undefined,
+                border:
+                  selectedId === env.id ? '1px solid #e8ad03' : '1px solid transparent',
+              }}
+              onClick={() => setSelectedId(env.id)}
+              actions={[
+                <Button
+                  key="use"
+                  size="small"
+                  type="link"
+                  disabled={env.id === activeEnvId}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    activate(env.id)
+                  }}
+                >
+                  {env.id === activeEnvId ? '使用中' : '切换'}
+                </Button>,
+                <Popconfirm
+                  key="del"
+                  title="确认删除该环境？"
+                  onConfirm={(e) => {
+                    e?.stopPropagation()
+                    remove(env.id)
+                  }}
+                  onCancel={(e) => e?.stopPropagation()}
+                >
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    删除
+                  </Button>
+                </Popconfirm>,
+              ]}
+            >
+              <List.Item.Meta
+                title={
+                  <Space>
+                    <span>{env.name}</span>
+                    {env.id === activeEnvId && (
+                      <Tag color="green" icon={<CheckCircleOutlined />}>
+                        当前
+                      </Tag>
+                    )}
+                  </Space>
+                }
+                description={
+                  <span className="text-muted">
+                    {CLOUD_PRESETS[env.cloud]?.label ?? env.cloud} · {env.tenantId.slice(0, 18) || '未配置'}
+                  </span>
+                }
+              />
+            </List.Item>
+          )}
         />
+      </Card>
 
-        <Space style={{ marginTop: 8 }}>
-          <Button type="primary" loading={saving} onClick={save}>
-            保存配置
-          </Button>
-          <Button loading={testing} onClick={test}>
-            保存并测试连接
-          </Button>
-        </Space>
-      </Form>
+      <Card
+        title={isNew ? '新建环境' : selectedEnv ? `编辑：${selectedEnv.name}` : '选择或新建一个环境'}
+        style={{ flex: 1, minWidth: 480 }}
+      >
+        {!selectedId && (
+          <Alert
+            type="info"
+            showIcon
+            message="从左侧选择一个环境编辑，或点「新建」添加"
+            description="每个环境包含独立的云类型、租户、服务主体凭据。切换环境后所有页面的数据随之切换。"
+          />
+        )}
+        {selectedId && (
+          <Form form={form} layout="vertical">
+            <Form.Item name="name" label="环境名称" rules={[{ required: true, message: '请填写名称' }]}>
+              <Input placeholder="如：世纪互联生产 / 客户A国际版" />
+            </Form.Item>
+            <Form.Item name="cloud" label="云环境" rules={[{ required: true }]}>
+              <Radio.Group optionType="button" buttonStyle="solid">
+                <Radio.Button value="global">国际版</Radio.Button>
+                <Radio.Button value="china">世纪互联</Radio.Button>
+              </Radio.Group>
+            </Form.Item>
+            <Form.Item
+              name="tenantId"
+              label="租户 ID（或租户域名）"
+              rules={[{ required: true, message: '请填写租户 ID' }]}
+            >
+              <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            </Form.Item>
+            <Form.Item
+              name="clientId"
+              label="客户端 ID（应用程序 ID）"
+              rules={[{ required: true, message: '请填写客户端 ID' }]}
+            >
+              <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            </Form.Item>
+            <Form.Item
+              name="clientSecret"
+              label={`客户端密钥${selectedEnv?.hasSecret ? `（已保存 ${selectedEnv.secretPreview}，留空不改）` : ''}`}
+              rules={[{ required: !selectedEnv?.hasSecret, message: '请填写客户端密钥' }]}
+            >
+              <Input.Password
+                placeholder={selectedEnv?.hasSecret ? '留空保持不变' : '应用注册中创建的密钥值'}
+              />
+            </Form.Item>
+            <Collapse
+              ghost
+              items={[
+                {
+                  key: 'advanced',
+                  label: '高级设置（端点覆盖，一般留空）',
+                  children: (
+                    <>
+                      <Form.Item name="authorityOverride" label="认证地址 Authority" initialValue="">
+                        <Input placeholder={`默认 ${preset.authority}`} />
+                      </Form.Item>
+                      <Form.Item name="apiBaseOverride" label="API 基地址" initialValue="">
+                        <Input placeholder={`默认 ${preset.apiBase}`} />
+                      </Form.Item>
+                      <Form.Item name="resourceOverride" label="Token Resource" initialValue="">
+                        <Input placeholder={`默认 ${preset.resource}`} />
+                      </Form.Item>
+                    </>
+                  ),
+                },
+              ]}
+            />
+            <Space style={{ marginTop: 8 }}>
+              <Button type="primary" loading={saving} onClick={() => persist(false)}>
+                保存并使用
+              </Button>
+              <Button loading={saving || testing} onClick={() => persist(true)}>
+                保存并测试连接
+              </Button>
+            </Space>
+            <p style={{ marginTop: 8 }} className="text-muted">
+              当前云应用注册门户：
+              <Typography.Link href={preset.portal} target="_blank">
+                {preset.portal}
+              </Typography.Link>
+            </p>
+          </Form>
+        )}
 
-      {testResult && (
-        <Alert
-          type="success"
-          showIcon
-          style={{ marginTop: 16 }}
-          message="连接成功"
-          description={
-            <Descriptions column={2} size="small">
-              <Descriptions.Item label="Token">{testResult.tokenPreview}</Descriptions.Item>
-              <Descriptions.Item label="数据模式">
-                {testResult.mode === 'member'
-                  ? `成员模式（服务主体已加入的工作区）`
-                  : '管理模式（全租户）'}
-              </Descriptions.Item>
-              <Descriptions.Item label="工作区数">{testResult.workspaceCount}</Descriptions.Item>
-              <Descriptions.Item label="报表数">{testResult.reportCount}</Descriptions.Item>
-              <Descriptions.Item label="数据集数">{testResult.datasetCount}</Descriptions.Item>
-              <Descriptions.Item label="快照时间">
-                {new Date(testResult.fetchedAt).toLocaleString()}
-              </Descriptions.Item>
-            </Descriptions>
-          }
-        />
-      )}
-      {testError && (
-        <Alert
-          type="error"
-          showIcon
-          style={{ marginTop: 16 }}
-          message="连接失败"
-          description={testError}
-        />
-      )}
-    </Card>
+        {testResult && (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginTop: 16 }}
+            message="连接成功"
+            description={
+              <Descriptions column={2} size="small">
+                <Descriptions.Item label="Token">{testResult.tokenPreview}</Descriptions.Item>
+                <Descriptions.Item label="数据模式">
+                  {testResult.mode === 'member' ? '成员模式（服务主体已加入的工作区）' : '管理模式（全租户）'}
+                </Descriptions.Item>
+                <Descriptions.Item label="工作区数">{testResult.workspaceCount}</Descriptions.Item>
+                <Descriptions.Item label="报表数">{testResult.reportCount}</Descriptions.Item>
+                <Descriptions.Item label="数据集数">{testResult.datasetCount}</Descriptions.Item>
+              </Descriptions>
+            }
+          />
+        )}
+        {testError && (
+          <Alert type="error" showIcon style={{ marginTop: 16 }} message="连接失败" description={testError} />
+        )}
+      </Card>
+    </div>
   )
 }

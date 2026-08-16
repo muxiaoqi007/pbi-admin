@@ -1,5 +1,5 @@
 import { getAccessToken } from './auth'
-import { resolveRuntime } from './config'
+import { getActiveEnvironment, resolveRuntime } from './config'
 import type {
   DatasetSchema,
   DatasetView,
@@ -110,11 +110,18 @@ async function toPbiError(res: Response): Promise<PbiError> {
 // ---------------------------------------------------------------------------
 
 const SNAPSHOT_TTL_MS = 5 * 60 * 1000
-let snapshotCache: { data: TenantSnapshot; at: number } | null = null
+let snapshotCache: { envId: string; data: TenantSnapshot; at: number } | null = null
+
+/** 当前激活环境 ID（用于缓存隔离） */
+function activeEnvId(): string {
+  return getActiveEnvironment()?.id ?? ''
+}
 
 /** 当前快照模式：admin = 全租户管理 API；member = 服务主体可见的工作区 */
 export function getSnapshotMode(): 'admin' | 'member' {
-  return snapshotCache?.data.mode ?? 'admin'
+  return snapshotCache && snapshotCache.envId === activeEnvId()
+    ? snapshotCache.data.mode
+    : 'admin'
 }
 
 function buildSnapshot(
@@ -209,7 +216,13 @@ async function scanAsMember(): Promise<TenantSnapshot> {
 }
 
 export async function getTenantSnapshot(force = false): Promise<TenantSnapshot> {
-  if (!force && snapshotCache && Date.now() - snapshotCache.at < SNAPSHOT_TTL_MS) {
+  const envId = activeEnvId()
+  if (
+    !force &&
+    snapshotCache &&
+    snapshotCache.envId === envId &&
+    Date.now() - snapshotCache.at < SNAPSHOT_TTL_MS
+  ) {
     return snapshotCache.data
   }
   let snapshot: TenantSnapshot
@@ -223,7 +236,7 @@ export async function getTenantSnapshot(force = false): Promise<TenantSnapshot> 
       throw e
     }
   }
-  snapshotCache = { data: snapshot, at: Date.now() }
+  snapshotCache = { envId, data: snapshot, at: Date.now() }
   return snapshot
 }
 
@@ -471,7 +484,7 @@ export async function addServicePrincipalToWorkspace(
 // ---------------------------------------------------------------------------
 
 const SCHEMA_TTL_MS = 30 * 60 * 1000
-const schemaCache = new Map<string, { at: number; datasets: Map<string, DatasetSchema> }>()
+const schemaCache = new Map<string, { envId: string; at: number; datasets: Map<string, DatasetSchema> }>()
 
 interface ScanResultWorkspace {
   id?: string
@@ -548,10 +561,10 @@ export async function scanWorkspacesSchemas(workspaceIds: string[]): Promise<Map
 /** 确保某工作区的 Schema 已缓存（未缓存则触发扫描） */
 export async function ensureWorkspaceSchema(workspaceId: string): Promise<Map<string, DatasetSchema>> {
   const hit = schemaCache.get(workspaceId)
-  if (hit && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.datasets
+  if (hit && hit.envId === activeEnvId() && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.datasets
   const byWorkspace = await scanWorkspacesSchemas([workspaceId])
   const datasets = byWorkspace.get(workspaceId) ?? new Map<string, DatasetSchema>()
-  schemaCache.set(workspaceId, { at: Date.now(), datasets })
+  schemaCache.set(workspaceId, { envId: activeEnvId(), at: Date.now(), datasets })
   return datasets
 }
 
@@ -570,10 +583,15 @@ export async function getDatasetSchema(workspaceId: string, datasetId: string): 
 // ---------------------------------------------------------------------------
 
 const DS_INDEX_TTL_MS = 10 * 60 * 1000
-let dsIndexCache: { at: number; data: DatasourceIndex } | null = null
+let dsIndexCache: { envId: string; at: number; data: DatasourceIndex } | null = null
 
 export async function getDatasourceIndex(force = false): Promise<DatasourceIndex> {
-  if (!force && dsIndexCache && Date.now() - dsIndexCache.at < DS_INDEX_TTL_MS) {
+  if (
+    !force &&
+    dsIndexCache &&
+    dsIndexCache.envId === activeEnvId() &&
+    Date.now() - dsIndexCache.at < DS_INDEX_TTL_MS
+  ) {
     return dsIndexCache.data
   }
   const snap = await getTenantSnapshot(force)
@@ -629,7 +647,7 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
     scanned,
     items,
   }
-  dsIndexCache = { at: Date.now(), data }
+  dsIndexCache = { envId: activeEnvId(), at: Date.now(), data }
   return data
 }
 
@@ -649,7 +667,7 @@ export interface RefreshFailureItem {
 }
 
 const FAILURES_TTL_MS = 10 * 60 * 1000
-let failuresCache: { at: number; data: RefreshFailureItem[] } | null = null
+let failuresCache: { envId: string; at: number; data: RefreshFailureItem[] } | null = null
 
 /** 解析 serviceExceptionJson：兼容 {errorCode, errorDescription} 和 {error:{message}} 两种格式 */
 function briefRefreshError(raw?: string): string {
@@ -666,7 +684,12 @@ function briefRefreshError(raw?: string): string {
 }
 
 export async function getRefreshFailures(force = false): Promise<RefreshFailureItem[]> {
-  if (!force && failuresCache && Date.now() - failuresCache.at < FAILURES_TTL_MS) {
+  if (
+    !force &&
+    failuresCache &&
+    failuresCache.envId === activeEnvId() &&
+    Date.now() - failuresCache.at < FAILURES_TTL_MS
+  ) {
     return failuresCache.data
   }
   const snap = await getTenantSnapshot(force)
@@ -701,6 +724,6 @@ export async function getRefreshFailures(force = false): Promise<RefreshFailureI
   }
 
   failures.sort((a, b) => (a.startTime < b.startTime ? 1 : -1))
-  failuresCache = { at: Date.now(), data: failures }
+  failuresCache = { envId: activeEnvId(), at: Date.now(), data: failures }
   return failures
 }

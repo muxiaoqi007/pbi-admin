@@ -15,14 +15,17 @@ export default function ToolsPage() {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<{ added: number; failures: { workspaceId: string; error: string }[] } | null>(null)
 
-  const { data: configData } = useSWR<{ config: { clientId: string } }>('/api/config', fetcher)
+  const { data: configData } = useSWR<{ activeEnv?: { clientId: string } }>(
+    '/api/config',
+    fetcher,
+  )
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
     fetcher,
     { keepPreviousData: true },
   )
 
-  const clientId = configData?.config.clientId ?? ''
+  const clientId = configData?.activeEnv?.clientId ?? ''
   const memberMode = data?.mode === 'member'
 
   const rows = useMemo(() => {
