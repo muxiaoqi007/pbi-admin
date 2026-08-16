@@ -289,13 +289,34 @@ export async function getRefreshHistory(workspaceId: string, datasetId: string):
   }
 }
 
-/** 数据集表清单：走普通 API（服务主体需在工作区内）。注意该接口仅对推送数据集有效，
- *  普通数据集会 404 —— 前端会降级为手动输入表名 */
+/** 数据集表清单（服务主体需在工作区内）：
+ *  1) REST /tables —— 仅推送数据集有效，普通语义模型返回 404
+ *  2) 回退 executeQueries + DAX 目录查询 INFO.VIEW.TABLES()，适用普通语义模型 */
 export async function getDatasetTables(workspaceId: string, datasetId: string): Promise<PbiTable[]> {
-  const data = await pbiJson<{ value: PbiTable[] }>(
-    `/groups/${workspaceId}/datasets/${datasetId}/tables`,
-  )
-  return data.value ?? []
+  try {
+    const data = await pbiJson<{ value: PbiTable[] }>(
+      `/groups/${workspaceId}/datasets/${datasetId}/tables`,
+    )
+    if (Array.isArray(data.value)) return data.value
+  } catch (e) {
+    if (!(e instanceof PbiError) || ![400, 404].includes(e.status)) throw e
+  }
+
+  const data = await pbiJson<{
+    results?: { tables?: { rows?: Record<string, unknown>[] }[] }[]
+  }>(`/groups/${workspaceId}/datasets/${datasetId}/executeQueries`, {
+    method: 'POST',
+    body: JSON.stringify({
+      queries: [{ query: 'EVALUATE TOPN(500, INFO.VIEW.TABLES())' }],
+    }),
+  })
+  const rows = data.results?.[0]?.tables?.[0]?.rows ?? []
+  return rows
+    .map((r) => ({
+      name: String(r['[Name]'] ?? ''),
+      isHidden: Boolean(r['[IsHidden]']),
+    }))
+    .filter((t) => t.name)
 }
 
 export async function getRefreshables(): Promise<PbiRefreshable[]> {

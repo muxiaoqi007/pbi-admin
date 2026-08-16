@@ -167,7 +167,7 @@ export default function RefreshModal({
                 showIcon
                 style={{ marginBottom: 16 }}
                 message="无法自动读取表清单"
-                description="Power BI 的表清单接口（/tables）仅对推送数据集开放，普通数据集请手动输入表名后回车。表名可在 Power BI Desktop 的模型视图中确认。"
+                description="自动读取依次尝试 REST 表接口和 DAX 目录查询（INFO.VIEW.TABLES），均失败说明该数据集不支持或服务主体缺少 Build 权限。请手动输入表名后回车，表名可在 Power BI Desktop 的模型视图中确认。"
               />
             )}
           </>
