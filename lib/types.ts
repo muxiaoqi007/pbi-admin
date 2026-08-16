@@ -165,6 +165,15 @@ export interface PbiRefresh {
   requestSentOn?: string
 }
 
+/** 数据集刷新计划（定时刷新配置） */
+export interface PbiRefreshSchedule {
+  days?: string[]
+  times?: string[]
+  enabled?: boolean
+  localTimeZoneId?: string
+  notifyOption?: string
+}
+
 export interface PbiTable {
   name: string
   isHidden?: boolean

@@ -8,6 +8,7 @@ import type {
   PbiDatasource,
   PbiRefresh,
   PbiRefreshable,
+  PbiRefreshSchedule,
   PbiTable,
   PbiWorkspace,
   PbiWorkspaceUser,
@@ -287,6 +288,11 @@ export async function getRefreshHistory(workspaceId: string, datasetId: string):
     }
     throw e
   }
+}
+
+/** 数据集的定时刷新计划 */
+export async function getRefreshSchedule(workspaceId: string, datasetId: string): Promise<PbiRefreshSchedule> {
+  return pbiJson<PbiRefreshSchedule>(`/groups/${workspaceId}/datasets/${datasetId}/refreshSchedule`)
 }
 
 /** 数据集表清单（服务主体需在工作区内）：

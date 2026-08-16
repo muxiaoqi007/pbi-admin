@@ -1,11 +1,11 @@
 'use client'
 
-import { Button, Drawer, Table, Tag, Tooltip } from 'antd'
+import { Button, Descriptions, Drawer, Table, Tag, Tooltip } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import { fetcher } from '@/lib/client'
-import type { DatasetView, PbiRefresh } from '@/lib/types'
+import type { DatasetView, PbiRefresh, PbiRefreshSchedule } from '@/lib/types'
 
 const STATUS: Record<string, { color: string; text: string }> = {
   Completed: { color: 'green', text: '成功' },
@@ -13,6 +13,11 @@ const STATUS: Record<string, { color: string; text: string }> = {
   InProgress: { color: 'blue', text: '进行中' },
   NotStarted: { color: 'default', text: '排队中' },
   Unknown: { color: 'default', text: '未知' },
+}
+
+const DAY_LABELS: Record<string, string> = {
+  Sunday: '周日', Monday: '周一', Tuesday: '周二', Wednesday: '周三',
+  Thursday: '周四', Friday: '周五', Saturday: '周六',
 }
 
 function fmtDuration(r: PbiRefresh): string {
@@ -23,7 +28,24 @@ function fmtDuration(r: PbiRefresh): string {
   return s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`
 }
 
-/** 数据集刷新记录抽屉，有进行中的刷新时每 30 秒自动轮询 */
+function fmtSchedule(s?: PbiRefreshSchedule) {
+  if (!s) return '-'
+  if (!s.enabled) return <Tag>未启用</Tag>
+  const days = (s.days ?? []).map((d) => DAY_LABELS[d] ?? d).join('、') || '每天'
+  const times = (s.times ?? []).join('、') || '-'
+  const tz = s.localTimeZoneId ?? 'UTC'
+  const notify = s.notifyOption === 'MailOnFailure' ? '失败时邮件通知' : s.notifyOption ?? '-'
+  return (
+    <Descriptions column={1} size="small" style={{ marginBottom: 0 }}>
+      <Descriptions.Item label="状态"><Tag color="green">已启用</Tag></Descriptions.Item>
+      <Descriptions.Item label="刷新时间">{days} {times}</Descriptions.Item>
+      <Descriptions.Item label="时区">{tz}</Descriptions.Item>
+      <Descriptions.Item label="通知">{notify}</Descriptions.Item>
+    </Descriptions>
+  )
+}
+
+/** 数据集刷新记录抽屉，有进行中的刷新时每 30 秒自动轮询；顶部展示定时刷新计划 */
 export default function RefreshHistoryDrawer({
   open,
   onClose,
@@ -40,11 +62,19 @@ export default function RefreshHistoryDrawer({
     fetcher,
     {
       refreshInterval: (latest?: { refreshes: PbiRefresh[] }) => {
-        const active = latest?.refreshes?.some((r) => ['InProgress', 'NotStarted', 'Unknown'].includes(r.status ?? ''))
+        const active = latest?.refreshes?.some((r) =>
+          ['InProgress', 'NotStarted', 'Unknown'].includes(r.status ?? ''),
+        )
         return active ? 30_000 : 0
       },
     },
   )
+
+  const scheduleKey =
+    open && dataset
+      ? `/api/datasets/refresh-schedule?wid=${dataset.workspaceId}&did=${dataset.id}`
+      : null
+  const { data: scheduleData } = useSWR<{ schedule: PbiRefreshSchedule }>(scheduleKey, fetcher)
 
   return (
     <Drawer
@@ -58,6 +88,11 @@ export default function RefreshHistoryDrawer({
         </Button>
       }
     >
+      <div style={{ marginBottom: 16, padding: 12, background: '#fafafa', borderRadius: 8 }}>
+        <div style={{ fontWeight: 500, marginBottom: 8 }}>定时刷新计划</div>
+        {fmtSchedule(scheduleData?.schedule)}
+      </div>
+
       {error && <p className="text-error">{String(error.message ?? error)}</p>}
       <Table
         rowKey="id"
