@@ -2,6 +2,8 @@ import { getAccessToken } from './auth'
 import { resolveRuntime } from './config'
 import type {
   DatasetView,
+  DatasourceIndex,
+  DatasourceIndexItem,
   PbiAdminUser,
   PbiDatasource,
   PbiRefresh,
@@ -9,6 +11,7 @@ import type {
   PbiTable,
   PbiWorkspace,
   PbiWorkspaceUser,
+  RefreshType,
   ReportView,
   TenantSnapshot,
   WorkspaceView,
@@ -310,13 +313,17 @@ export async function getRefreshables(): Promise<PbiRefreshable[]> {
 export interface RefreshRequest {
   workspaceId: string
   datasetId: string
-  /** all = 经典全量刷新；tables = 增强刷新（可指定表） */
-  mode: 'all' | 'tables'
+  /** all = 经典全量；allEnhanced = 增强全量（可用处理类型/并行/重试）；tables = 选表增强刷新 */
+  mode: 'all' | 'allEnhanced' | 'tables'
   tables?: string[]
-  type?: 'full' | 'automatic'
+  type?: RefreshType
   retryCount?: number
   maxParallelism?: number
   commitMode?: 'transactional' | 'partialBatch'
+  /** 增量刷新策略：false = 忽略策略强制完整刷新 */
+  applyRefreshPolicy?: boolean
+  /** 增量刷新的有效日期（ISO），未填用服务端当前时间 */
+  effectiveDate?: string
 }
 
 export interface Accepted {
@@ -336,7 +343,15 @@ export async function triggerRefresh(req: RefreshRequest): Promise<Accepted> {
       maxParallelism: req.maxParallelism ?? 1,
       retryCount: req.retryCount ?? 0,
       notifyOption: 'NoNotification',
-      objects: (req.tables ?? []).map((t) => ({ table: t })),
+    }
+    if (req.mode === 'tables') {
+      body.objects = (req.tables ?? []).map((t) => ({ table: t }))
+    }
+    if (req.applyRefreshPolicy !== undefined) {
+      body.applyRefreshPolicy = req.applyRefreshPolicy
+    }
+    if (req.effectiveDate) {
+      body.effectiveDate = req.effectiveDate
     }
   }
   const res = await pbiRequest(
@@ -372,4 +387,72 @@ export async function addServicePrincipalToWorkspace(
       groupUserAccessRight: role,
     }),
   })
+}
+
+// ---------------------------------------------------------------------------
+// 数据源视角：按数据源聚合全部数据集（并发扫描，缓存 10 分钟）
+// ---------------------------------------------------------------------------
+
+const DS_INDEX_TTL_MS = 10 * 60 * 1000
+let dsIndexCache: { at: number; data: DatasourceIndex } | null = null
+
+export async function getDatasourceIndex(force = false): Promise<DatasourceIndex> {
+  if (!force && dsIndexCache && Date.now() - dsIndexCache.at < DS_INDEX_TTL_MS) {
+    return dsIndexCache.data
+  }
+  const snap = await getTenantSnapshot(force)
+  const map = new Map<string, DatasourceIndexItem>()
+  let scanned = 0
+
+  const CONCURRENCY = 8
+  for (let i = 0; i < snap.datasets.length; i += CONCURRENCY) {
+    await Promise.allSettled(
+      snap.datasets.slice(i, i + CONCURRENCY).map(async (d) => {
+        let list: PbiDatasource[]
+        try {
+          list = await getDatasetDatasources(d.id, d.workspaceId)
+        } catch {
+          return // 个别数据集不可访问时跳过
+        }
+        scanned++
+        for (const s of list) {
+          const cd = s.connectionDetails ?? {}
+          const primary = cd.server ?? cd.path ?? cd.url ?? s.name ?? '(未知)'
+          const secondary = cd.database ?? cd.kind
+          const key = `${s.datasourceType}|${primary}|${secondary ?? ''}`
+          let item = map.get(key)
+          if (!item) {
+            item = {
+              key,
+              type: s.datasourceType,
+              primary,
+              secondary,
+              gatewayId: s.gatewayId,
+              datasetCount: 0,
+              datasets: [],
+            }
+            map.set(key, item)
+          }
+          if (!item.datasets.some((x) => x.id === d.id)) {
+            item.datasets.push({
+              id: d.id,
+              name: d.name,
+              workspaceId: d.workspaceId,
+              workspaceName: d.workspaceName,
+            })
+            item.datasetCount++
+          }
+        }
+      }),
+    )
+  }
+
+  const items = Array.from(map.values()).sort((a, b) => b.datasetCount - a.datasetCount)
+  const data: DatasourceIndex = {
+    fetchedAt: new Date().toISOString(),
+    scanned,
+    items,
+  }
+  dsIndexCache = { at: Date.now(), data }
+  return data
 }

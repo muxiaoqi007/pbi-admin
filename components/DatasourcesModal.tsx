@@ -3,22 +3,11 @@
 import { Modal, Table, Tag, Tooltip } from 'antd'
 import useSWR from 'swr'
 import { fetcher } from '@/lib/client'
-import { CONNECTION_LABELS, type PbiDatasource } from '@/lib/types'
-
-const TYPE_LABELS: Record<string, string> = {
-  File: '文件',
-  Folder: '文件夹',
-  Sql: 'SQL 数据库',
-  MySql: 'MySQL',
-  AnalysisServices: '分析服务',
-  Web: 'Web',
-  Extension: '扩展连接器',
-  OData: 'OData',
-  SharePoint: 'SharePoint',
-  Exchange: 'Exchange',
-  Oracle: 'Oracle',
-  PostgreSql: 'PostgreSQL',
-}
+import {
+  CONNECTION_LABELS,
+  DATASOURCE_TYPE_LABELS as TYPE_LABELS,
+  type PbiDatasource,
+} from '@/lib/types'
 
 /** 把 connectionDetails 的所有键值对渲染成多行文本 */
 function renderConnection(d: PbiDatasource): string {

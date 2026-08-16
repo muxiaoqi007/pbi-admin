@@ -105,6 +105,56 @@ export const CONNECTION_LABELS: Record<string, string> = {
   class: '类别',
 }
 
+/** 数据源类型中文标签（数据源弹窗与数据源视角共用） */
+export const DATASOURCE_TYPE_LABELS: Record<string, string> = {
+  File: '文件',
+  Folder: '文件夹',
+  Sql: 'SQL 数据库',
+  MySql: 'MySQL',
+  AnalysisServices: '分析服务',
+  Web: 'Web',
+  Extension: '扩展连接器',
+  OData: 'OData',
+  SharePoint: 'SharePoint',
+  Exchange: 'Exchange',
+  Oracle: 'Oracle',
+  PostgreSql: 'PostgreSQL',
+  Db2: 'DB2',
+  Teradata: 'Teradata',
+  SapHana: 'SAP HANA',
+}
+
+/** 数据源视角：一条聚合后的数据源及其关联的数据集 */
+export interface DatasourceIndexItem {
+  key: string
+  type: string
+  /** 服务器 / 路径 / 网址 */
+  primary: string
+  /** 数据库 / 连接器 */
+  secondary?: string
+  gatewayId?: string
+  datasetCount: number
+  datasets: { id: string; name: string; workspaceId: string; workspaceName: string }[]
+}
+
+export interface DatasourceIndex {
+  fetchedAt: string
+  /** 成功扫描的数据集数（失败的不计入） */
+  scanned: number
+  items: DatasourceIndexItem[]
+}
+
+/** 增强刷新支持的处理类型（TMSL refresh type），客户端与服务端共用 */
+export const REFRESH_TYPES = [
+  'full',
+  'automatic',
+  'dataOnly',
+  'calculate',
+  'clearValues',
+  'defragment',
+] as const
+export type RefreshType = (typeof REFRESH_TYPES)[number]
+
 export interface PbiRefresh {
   id: string
   refreshType?: string

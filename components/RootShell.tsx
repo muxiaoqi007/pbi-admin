@@ -11,6 +11,7 @@ import {
   theme,
 } from 'antd'
 import {
+  ApiOutlined,
   BarChartOutlined,
   DashboardOutlined,
   DatabaseOutlined,
@@ -31,6 +32,7 @@ const MENU_ITEMS = [
   { key: '/workspaces', icon: <PartitionOutlined />, label: '工作区' },
   { key: '/reports', icon: <BarChartOutlined />, label: '报表' },
   { key: '/datasets', icon: <DatabaseOutlined />, label: '数据集' },
+  { key: '/datasources', icon: <ApiOutlined />, label: '数据源视角' },
   { key: '/tools', icon: <ToolOutlined />, label: '运维工具' },
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ]
