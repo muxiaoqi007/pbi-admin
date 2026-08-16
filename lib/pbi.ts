@@ -1,6 +1,7 @@
 import { getAccessToken } from './auth'
 import { resolveRuntime } from './config'
 import type {
+  DatasetSchema,
   DatasetView,
   DatasourceIndex,
   DatasourceIndexItem,
@@ -15,6 +16,9 @@ import type {
   PbiWorkspaceUser,
   RefreshType,
   ReportView,
+  SchemaColumn,
+  SchemaMeasure,
+  SchemaTable,
   TenantSnapshot,
   WorkspaceView,
 } from './types'
@@ -344,22 +348,31 @@ export async function getDatasetTables(workspaceId: string, datasetId: string): 
       }),
     })
     const rows = data.results?.[0]?.tables?.[0]?.rows ?? []
-    return rows
+    const tables = rows
       .map((r) => ({
         name: String(r['[Name]'] ?? ''),
         isHidden: Boolean(r['[IsHidden]']),
       }))
       .filter((t) => t.name)
+    if (tables.length > 0) return tables
   } catch (e) {
-    if (e instanceof PbiError && (e.status === 401 || e.status === 403)) {
-      throw new PbiError(
-        e.status,
-        '无法读取表清单：该数据集未授予服务主体 Build（重新生成）权限。executeQueries 需要"使用 + 重新生成"权限，工作区成员权限不够。请在 Power BI 服务的「数据集 → 权限」或「语义模型 → 使用权限」中给服务主体添加 Build 权限；或先手动输入表名（见下）。',
-        e.code,
-      )
-    }
-    throw e
+    if (!(e instanceof PbiError) || ![400, 401, 403, 404].includes(e.status)) throw e
   }
+
+  // 3) getInfo Schema 扫描（无需 Build 权限，但需要管理 API 可用；首次较慢 5-15 秒）
+  try {
+    const schema = await getDatasetSchema(workspaceId, datasetId)
+    if (schema.tables.length > 0) {
+      return schema.tables.map((t) => ({ name: t.name, isHidden: t.isHidden }))
+    }
+  } catch {
+    /* Schema 扫描不可用时走到底部的手动输入提示 */
+  }
+
+  throw new PbiError(
+    401,
+    '无法自动读取表清单（REST 表接口仅推送数据集可用；DAX 目录查询需要 Build 权限；Schema 扫描需要管理 API 权限）。请手动输入表名后回车，输入过的表名会自动缓存。',
+  )
 }
 
 export async function getRefreshables(): Promise<PbiRefreshable[]> {
@@ -451,6 +464,105 @@ export async function addServicePrincipalToWorkspace(
       groupUserAccessRight: role,
     }),
   })
+}
+
+// ---------------------------------------------------------------------------
+// 工作区 Schema 扫描（getInfo）：完整表/列/度量值结构，工作区级缓存 30 分钟
+// ---------------------------------------------------------------------------
+
+const SCHEMA_TTL_MS = 30 * 60 * 1000
+const schemaCache = new Map<string, { at: number; datasets: Map<string, DatasetSchema> }>()
+
+interface ScanResultWorkspace {
+  id?: string
+  name?: string
+  datasets?: {
+    id: string
+    name?: string
+    tables?: {
+      name: string
+      isHidden?: boolean
+      columns?: SchemaColumn[]
+      measures?: SchemaMeasure[]
+    }[]
+  }[]
+}
+
+function parseSchemaFromScan(result: { workspaces?: ScanResultWorkspace[] }) {
+  const byWorkspace = new Map<string, Map<string, DatasetSchema>>()
+  for (const ws of result.workspaces ?? []) {
+    if (!ws?.id) continue
+    const datasets = new Map<string, DatasetSchema>()
+    for (const ds of ws.datasets ?? []) {
+      const tables: SchemaTable[] = (ds.tables ?? []).map((t) => ({
+        name: t.name,
+        isHidden: t.isHidden,
+        columns: t.columns ?? [],
+        measures: t.measures ?? [],
+      }))
+      datasets.set(ds.id, {
+        tables,
+        measureCount: tables.reduce((n, t) => n + (t.measures?.length ?? 0), 0),
+        columnCount: tables.reduce((n, t) => n + (t.columns?.length ?? 0), 0),
+      })
+    }
+    byWorkspace.set(ws.id, datasets)
+  }
+  return byWorkspace
+}
+
+/** 提交 getInfo 扫描并轮询到完成，返回解析后的工作区→数据集 Schema 映射 */
+export async function scanWorkspacesSchemas(workspaceIds: string[]): Promise<Map<string, Map<string, DatasetSchema>>> {
+  const res = await pbiRequest(
+    `/admin/workspaces/getInfo?lineage=True&datasourceDetails=True&datasetSchema=True&datasetExpressions=True`,
+    { method: 'POST', body: JSON.stringify({ workspaces: workspaceIds.slice(0, 100) }) },
+  )
+  if (res.status !== 202) {
+    if (res.status === 401 || res.status === 403) {
+      throw new PbiError(
+        res.status,
+        'Schema 扫描（getInfo）无权限。此接口要求应用注册具有 WorkspaceInfo.ReadWrite.All 等应用程序权限并已授予管理员同意（国际版还要求租户设置允许服务主体使用 Fabric API）。',
+      )
+    }
+    throw await toPbiError(res)
+  }
+  const { id: scanId } = (await res.json()) as { id: string }
+  if (!scanId) throw new PbiError(500, '扫描提交成功但未返回 scanId')
+
+  // 轮询（最多 45 秒，每 3 秒一次）
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 3000))
+    const stRes = await pbiRequest(`/admin/workspaces/scanStatus/${scanId}`)
+    if (!stRes.ok) continue
+    const st = (await stRes.json()) as { status?: string }
+    if (st.status === 'Failed') throw new PbiError(500, '工作区扫描失败（服务端返回 Failed）')
+    if (st.status === 'Succeeded') {
+      const resultRes = await pbiRequest(`/admin/workspaces/scanResult/${scanId}`)
+      if (!resultRes.ok) throw await toPbiError(resultRes)
+      return parseSchemaFromScan(await resultRes.json())
+    }
+  }
+  throw new PbiError(504, '工作区扫描超时（45 秒）')
+}
+
+/** 确保某工作区的 Schema 已缓存（未缓存则触发扫描） */
+export async function ensureWorkspaceSchema(workspaceId: string): Promise<Map<string, DatasetSchema>> {
+  const hit = schemaCache.get(workspaceId)
+  if (hit && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.datasets
+  const byWorkspace = await scanWorkspacesSchemas([workspaceId])
+  const datasets = byWorkspace.get(workspaceId) ?? new Map<string, DatasetSchema>()
+  schemaCache.set(workspaceId, { at: Date.now(), datasets })
+  return datasets
+}
+
+/** 获取单个数据集的完整 Schema（表/列/度量值），未缓存时扫描整个工作区 */
+export async function getDatasetSchema(workspaceId: string, datasetId: string): Promise<DatasetSchema> {
+  const datasets = await ensureWorkspaceSchema(workspaceId)
+  const schema = datasets.get(datasetId)
+  if (!schema) {
+    throw new PbiError(404, `扫描结果中未找到该数据集的 Schema（数据集可能不支持 Schema 提取，或为推送/流式数据集）`)
+  }
+  return schema
 }
 
 // ---------------------------------------------------------------------------

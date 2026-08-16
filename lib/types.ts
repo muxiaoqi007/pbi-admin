@@ -207,6 +207,33 @@ export interface PbiReportPage {
   order?: number
 }
 
+/** getInfo 扫描返回的数据集 Schema 结构 */
+export interface SchemaColumn {
+  name: string
+  dataType?: string
+}
+
+export interface SchemaMeasure {
+  name: string
+  expression?: string
+  description?: string
+}
+
+export interface SchemaTable {
+  name: string
+  isHidden?: boolean
+  columns?: SchemaColumn[]
+  measures?: SchemaMeasure[]
+}
+
+export interface DatasetSchema {
+  tables: SchemaTable[]
+  /** 度量值总数 */
+  measureCount: number
+  /** 列总数 */
+  columnCount: number
+}
+
 /** 前端展示用的扁平化视图 */
 export interface WorkspaceView {
   id: string

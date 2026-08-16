@@ -9,6 +9,7 @@ import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
+import SchemaDrawer from '@/components/SchemaDrawer'
 import UsersTable from '@/components/UsersTable'
 import { fetcher, postJSON } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -28,6 +29,7 @@ export default function DatasetsPage() {
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
   const [usersDataset, setUsersDataset] = useState<DatasetView | null>(null)
+  const [schemaDataset, setSchemaDataset] = useState<DatasetView | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
@@ -176,11 +178,12 @@ export default function DatasetsPage() {
           },
           {
             title: '操作',
-            width: 300,
+            width: 340,
             fixed: 'right',
             render: (_: unknown, d) => (
               <Space size={10} split={<span className="text-muted">·</span>}>
                 <a onClick={() => setUsersDataset(d)}>用户</a>
+                <a onClick={() => setSchemaDataset(d)}>结构</a>
                 <a onClick={() => setDatasourceDataset(d)}>数据源</a>
                 <a onClick={() => setReportsDataset(d)}>关联报表</a>
                 <a onClick={() => setHistoryDataset(d)}>刷新记录</a>
@@ -268,6 +271,11 @@ export default function DatasetsPage() {
         {usersError && <ErrorAlert error={usersError} />}
         <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
       </Drawer>
+      <SchemaDrawer
+        open={!!schemaDataset}
+        dataset={schemaDataset}
+        onClose={() => setSchemaDataset(null)}
+      />
       <RefreshModal
         open={!!refreshDataset}
         dataset={refreshDataset}

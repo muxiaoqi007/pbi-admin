@@ -9,21 +9,24 @@ interface TokenCache {
 let cache: TokenCache | null = null
 
 /**
- * client_credentials 获取访问令牌（v1 认证流：/oauth2/token + resource 参数，
- * 与世纪互联/国际版 Power BI 均验证可用的方式一致），按配置签名缓存。
- * force=true 时强制刷新（配置变更或收到 401 时使用）。
+ * client_credentials 获取访问令牌。
+ * 使用 v2 端点（/oauth2/v2.0/token + scope 参数），与 MSAL
+ * ConfidentialClientApplication.acquire_token_for_client 行为一致。
+ * force=true 时强制刷新（配置变更或收到 401/403 时使用）。
  */
 export async function getAccessToken(force = false): Promise<string> {
   const cfg = await resolveRuntime()
   if (!configReady(cfg)) {
     throw new Error('尚未配置认证信息：请在「设置」页填写租户 ID、客户端 ID 和客户端密钥')
   }
-  const key = [cfg.authority, cfg.tenantId, cfg.clientId, cfg.clientSecret, cfg.resource].join('|')
+  // resource 基址（如 https://analysis.chinacloudapi.cn/powerbi/api），拼出 .default scope
+  const resource = cfg.resource.replace(/\/+$/, '').replace(/\/\.default$/, '')
+  const key = [cfg.authority, cfg.tenantId, cfg.clientId, cfg.clientSecret, resource].join('|')
   if (!force && cache && cache.key === key && Date.now() < cache.expiresAt) {
     return cache.token
   }
 
-  const tokenUrl = `${cfg.authority}/${cfg.tenantId}/oauth2/token`
+  const tokenUrl = `${cfg.authority}/${cfg.tenantId}/oauth2/v2.0/token`
   const res = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -31,7 +34,7 @@ export async function getAccessToken(force = false): Promise<string> {
       grant_type: 'client_credentials',
       client_id: cfg.clientId,
       client_secret: cfg.clientSecret,
-      resource: cfg.resource,
+      scope: `${resource}/.default`,
     }),
   })
 
