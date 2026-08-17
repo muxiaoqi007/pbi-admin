@@ -18,7 +18,6 @@ import {
   DatabaseOutlined,
   PartitionOutlined,
   SettingOutlined,
-  ToolOutlined,
 } from '@ant-design/icons'
 import useSWR from 'swr'
 import zhCN from 'antd/locale/zh_CN'
@@ -37,7 +36,6 @@ const MENU_ITEMS = [
   { key: '/reports', icon: <BarChartOutlined />, label: '报表' },
   { key: '/datasets', icon: <DatabaseOutlined />, label: '数据集' },
   { key: '/datasources', icon: <ApiOutlined />, label: '数据源' },
-  { key: '/tools', icon: <ToolOutlined />, label: '运维工具' },
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ]
 

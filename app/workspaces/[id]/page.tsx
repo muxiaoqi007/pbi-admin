@@ -2,22 +2,27 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Button, Card, Descriptions, Space, Table, Tabs, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined } from '@ant-design/icons'
+import { Button, Card, Descriptions, Dropdown, Drawer, Space, Table, Tabs, Tag, Typography } from 'antd'
+import { ArrowLeftOutlined, MoreOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
+import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
+import SchemaDrawer from '@/components/SchemaDrawer'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
-import type { DatasetView, TenantSnapshot } from '@/lib/types'
+import type { DatasetView, PbiAdminUser, TenantSnapshot } from '@/lib/types'
 
 export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter()
   const [workspaceId, setWorkspaceId] = useState('')
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
+  const [usersDataset, setUsersDataset] = useState<DatasetView | null>(null)
+  const [schemaDataset, setSchemaDataset] = useState<DatasetView | null>(null)
+  const [datasourceDataset, setDatasourceDataset] = useState<DatasetView | null>(null)
 
   useEffect(() => {
     params.then(({ id }) => setWorkspaceId(id))
@@ -27,6 +32,13 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
     '/api/snapshot',
     fetcher,
     { keepPreviousData: true },
+  )
+
+  const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
+    users: PbiAdminUser[]
+  }>(
+    usersDataset ? `/api/datasets/users?wid=${usersDataset.workspaceId}&did=${usersDataset.id}` : null,
+    fetcher,
   )
 
   const workspace = data?.workspaces.find((w) => w.id === workspaceId)
@@ -148,8 +160,22 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
                     width: 170,
                     render: (_: unknown, d: DatasetView) => (
                       <Space size={4}>
-                        <a onClick={() => setHistoryDataset(d)}>刷新记录</a>
                         <a onClick={() => setRefreshDataset(d)}>立即刷新</a>
+                        <Dropdown
+                          trigger={['click']}
+                          menu={{
+                            items: [
+                              { key: 'users', label: '用户', onClick: () => setUsersDataset(d) },
+                              { key: 'schema', label: '结构', onClick: () => setSchemaDataset(d) },
+                              { key: 'datasources', label: '数据源', onClick: () => setDatasourceDataset(d) },
+                              { key: 'history', label: '刷新记录', onClick: () => setHistoryDataset(d) },
+                            ],
+                          }}
+                        >
+                          <a onClick={(e) => e.preventDefault()}>
+                            <MoreOutlined /> 更多
+                          </a>
+                        </Dropdown>
                       </Space>
                     ),
                   },
@@ -170,6 +196,27 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
         dataset={refreshDataset}
         onClose={() => setRefreshDataset(null)}
         onTriggered={() => setHistoryDataset(refreshDataset)}
+      />
+      <Drawer
+        open={!!usersDataset}
+        onClose={() => setUsersDataset(null)}
+        width={680}
+        title={`数据集用户 — ${usersDataset?.name ?? ''}`}
+      >
+        {usersError && <ErrorAlert error={usersError} />}
+        <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
+      </Drawer>
+      <SchemaDrawer
+        open={!!schemaDataset}
+        dataset={schemaDataset}
+        onClose={() => setSchemaDataset(null)}
+      />
+      <DatasourcesModal
+        open={!!datasourceDataset}
+        onClose={() => setDatasourceDataset(null)}
+        datasetId={datasourceDataset?.id}
+        datasetName={datasourceDataset?.name}
+        workspaceId={datasourceDataset?.workspaceId}
       />
     </div>
   )
