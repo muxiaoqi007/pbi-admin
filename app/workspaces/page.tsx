@@ -71,9 +71,15 @@ export default function WorkspacesPage() {
         loading={isLoading}
         dataSource={filtered}
         pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
-        onRow={(record) => ({ onClick: () => router.push(`/workspaces/${record.id}`), style: { cursor: 'pointer' } })}
         columns={[
-          { title: '名称', dataIndex: 'name', ellipsis: true },
+          {
+            title: '名称',
+            dataIndex: 'name',
+            ellipsis: true,
+            render: (v: string, record) => (
+              <a onClick={() => router.push(`/workspaces/${record.id}`)}>{v}</a>
+            ),
+          },
           {
             title: '类型',
             dataIndex: 'type',

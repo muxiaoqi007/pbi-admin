@@ -1,8 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { App, Button, Drawer, Input, Modal, Space, Table, Tag, Typography } from 'antd'
-import { DownloadOutlined, ExportOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
+import { App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { DownloadOutlined, ExportOutlined, MoreOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
@@ -178,16 +178,27 @@ export default function DatasetsPage() {
           },
           {
             title: '操作',
-            width: 340,
+            width: 170,
             fixed: 'right',
             render: (_: unknown, d) => (
-              <Space size={10} split={<span className="text-muted">·</span>}>
-                <a onClick={() => setUsersDataset(d)}>用户</a>
-                <a onClick={() => setSchemaDataset(d)}>结构</a>
-                <a onClick={() => setDatasourceDataset(d)}>数据源</a>
-                <a onClick={() => setReportsDataset(d)}>关联报表</a>
-                <a onClick={() => setHistoryDataset(d)}>刷新记录</a>
+              <Space size={4}>
                 <a onClick={() => setRefreshDataset(d)}>立即刷新</a>
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: [
+                      { key: 'users', label: '用户', onClick: () => setUsersDataset(d) },
+                      { key: 'schema', label: '结构', onClick: () => setSchemaDataset(d) },
+                      { key: 'datasources', label: '数据源', onClick: () => setDatasourceDataset(d) },
+                      { key: 'reports', label: '关联报表', onClick: () => setReportsDataset(d) },
+                      { key: 'history', label: '刷新记录', onClick: () => setHistoryDataset(d) },
+                    ],
+                  }}
+                >
+                  <a onClick={(e) => e.preventDefault()}>
+                    <MoreOutlined /> 更多
+                  </a>
+                </Dropdown>
               </Space>
             ),
           },

@@ -60,7 +60,7 @@ export default function RefreshModal({
   const enhanced = mode !== 'all'
 
   useEffect(() => {
-    if (open) {
+    if (open && dataset) {
       form.setFieldsValue({
         mode: 'all',
         tables: [],
@@ -72,7 +72,7 @@ export default function RefreshModal({
         effectiveDate: null,
       })
     }
-  }, [open, form])
+  }, [open, dataset, form])
 
   const { tables, data, error, isLoading, addManualTables } = useDatasetTables(
     dataset?.workspaceId,

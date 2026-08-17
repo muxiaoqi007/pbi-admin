@@ -113,6 +113,7 @@ export default function ReportsPage() {
           {
             title: '操作',
             width: 260,
+            fixed: 'right',
             render: (_: unknown, r) => (
               <Space size={10}>
                 <a onClick={() => setUsersReport(r)}>用户</a>
