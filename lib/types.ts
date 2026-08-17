@@ -2,14 +2,20 @@
 
 export type CloudEnv = 'global' | 'china'
 
+/** 认证方式：servicePrincipal = 客户端密钥；password = 账号密码（ROPC） */
+export type AuthType = 'servicePrincipal' | 'password'
+
 /** 认证地址 / API 地址 / resource 都已解析完毕的运行时配置（来自激活的租户环境） */
 export interface RuntimeConfig {
   envId: string
   envName: string
   cloud: CloudEnv
+  authType: AuthType
   tenantId: string
   clientId: string
   clientSecret: string
+  username?: string
+  password?: string
   authority: string
   apiBase: string
   resource: string

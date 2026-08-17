@@ -27,13 +27,17 @@ interface MaskedEnv {
   id: string
   name: string
   cloud: CloudEnv
+  authType: 'servicePrincipal' | 'password'
   tenantId: string
   clientId: string
+  username: string
   authorityOverride: string
   apiBaseOverride: string
   resourceOverride: string
   hasSecret: boolean
   secretPreview: string
+  hasPassword: boolean
+  passwordPreview: string
 }
 
 interface ConfigResponse {
@@ -75,9 +79,12 @@ interface TestResult {
 interface FormValues {
   name: string
   cloud: CloudEnv
+  authType: 'servicePrincipal' | 'password'
   tenantId: string
   clientId: string
   clientSecret: string
+  username: string
+  password: string
   authorityOverride: string
   apiBaseOverride: string
   resourceOverride: string
@@ -100,6 +107,7 @@ export default function SettingsPage() {
   const isNew = selectedId === 'new'
   const cloud = Form.useWatch('cloud', form) ?? selectedEnv?.cloud ?? 'global'
   const preset = CLOUD_PRESETS[cloud as CloudEnv] ?? CLOUD_PRESETS.global
+  const authType = Form.useWatch('authType', form) ?? selectedEnv?.authType ?? 'servicePrincipal'
 
   useEffect(() => {
     if (selectedId && data) {
@@ -107,9 +115,12 @@ export default function SettingsPage() {
         form.setFieldsValue({
           name: '',
           cloud: 'china',
+          authType: 'servicePrincipal',
           tenantId: '',
           clientId: '',
           clientSecret: '',
+          username: '',
+          password: '',
           authorityOverride: '',
           apiBaseOverride: '',
           resourceOverride: '',
@@ -120,9 +131,12 @@ export default function SettingsPage() {
           form.setFieldsValue({
             name: env.name,
             cloud: env.cloud,
+            authType: env.authType ?? 'servicePrincipal',
             tenantId: env.tenantId,
             clientId: env.clientId,
             clientSecret: '',
+            username: env.username,
+            password: '',
             authorityOverride: env.authorityOverride,
             apiBaseOverride: env.apiBaseOverride,
             resourceOverride: env.resourceOverride,
@@ -297,6 +311,12 @@ export default function SettingsPage() {
                 <Radio.Button value="china">世纪互联</Radio.Button>
               </Radio.Group>
             </Form.Item>
+            <Form.Item name="authType" label="认证方式" rules={[{ required: true }]}>
+              <Radio.Group optionType="button" buttonStyle="solid">
+                <Radio.Button value="servicePrincipal">服务主体（密钥）</Radio.Button>
+                <Radio.Button value="password">账号密码</Radio.Button>
+              </Radio.Group>
+            </Form.Item>
             <Form.Item
               name="tenantId"
               label="租户 ID（或租户域名）"
@@ -311,15 +331,34 @@ export default function SettingsPage() {
             >
               <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
             </Form.Item>
-            <Form.Item
-              name="clientSecret"
-              label={`客户端密钥${selectedEnv?.hasSecret ? `（已保存 ${selectedEnv.secretPreview}，留空不改）` : ''}`}
-              rules={[{ required: !selectedEnv?.hasSecret, message: '请填写客户端密钥' }]}
-            >
-              <Input.Password
-                placeholder={selectedEnv?.hasSecret ? '留空保持不变' : '应用注册中创建的密钥值'}
-              />
-            </Form.Item>
+            {authType === 'password' ? (
+              <>
+                <Form.Item
+                  name="username"
+                  label="用户名（UPN 邮箱）"
+                  rules={[{ required: true, message: '请填写用户名' }]}
+                >
+                  <Input placeholder="admin@xxx.partner.onmschina.cn" />
+                </Form.Item>
+                <Form.Item
+                  name="password"
+                  label={`密码${selectedEnv?.hasPassword ? `（${selectedEnv.passwordPreview}，留空不改）` : ''}`}
+                  rules={[{ required: !selectedEnv?.hasPassword, message: '请填写密码' }]}
+                >
+                  <Input.Password placeholder={selectedEnv?.hasPassword ? '留空保持不变' : '账号密码'} />
+                </Form.Item>
+              </>
+            ) : (
+              <Form.Item
+                name="clientSecret"
+                label={`客户端密钥${selectedEnv?.hasSecret ? `（已保存 ${selectedEnv.secretPreview}，留空不改）` : ''}`}
+                rules={[{ required: !selectedEnv?.hasSecret, message: '请填写客户端密钥' }]}
+              >
+                <Input.Password
+                  placeholder={selectedEnv?.hasSecret ? '留空保持不变' : '应用注册中创建的密钥值'}
+                />
+              </Form.Item>
+            )}
             <Collapse
               ghost
               items={[

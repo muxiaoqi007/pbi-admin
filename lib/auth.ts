@@ -59,33 +59,53 @@ function decodeTokenDiagnostics(token: string): AccessTokenDiagnostics {
 }
 
 /**
- * client_credentials 获取访问令牌。
- * 使用 v2 端点（/oauth2/v2.0/token + scope 参数），与 MSAL
- * ConfidentialClientApplication.acquire_token_for_client 行为一致。
+ * 获取访问令牌。根据环境配置的 authType 自动选择：
+ * - servicePrincipal: client_credentials 流程（v2 端点 + scope）
+ * - password: ROPC 资源所有者密码流程（v2 端点 + username/password + scope）
  * force=true 时强制刷新（配置变更或收到 401/403 时使用）。
  */
 export async function getAccessToken(force = false): Promise<string> {
   const cfg = await resolveRuntime()
   if (!configReady(cfg)) {
-    throw new Error('尚未配置认证信息：请在「设置」页填写租户 ID、客户端 ID 和客户端密钥')
+    throw new Error(
+      cfg.authType === 'password'
+        ? '尚未配置认证信息：请在「设置」页填写租户 ID、客户端 ID、用户名和密码'
+        : '尚未配置认证信息：请在「设置」页填写租户 ID、客户端 ID 和客户端密钥',
+    )
   }
-  // resource 基址（如 https://analysis.chinacloudapi.cn/powerbi/api），拼出 .default scope
   const resource = cfg.resource.replace(/\/+$/, '').replace(/\/\.default$/, '')
-  const key = [cfg.authority, cfg.tenantId, cfg.clientId, cfg.clientSecret, resource].join('|')
+  const scope = `${resource}/.default`
+  const key = [
+    cfg.authority,
+    cfg.tenantId,
+    cfg.clientId,
+    cfg.authType,
+    cfg.authType === 'password' ? cfg.username : cfg.clientSecret,
+    cfg.authType === 'password' ? cfg.password : '',
+    resource,
+  ].join('|')
   if (!force && cache && cache.key === key && Date.now() < cache.expiresAt) {
     return cache.token
   }
 
   const tokenUrl = `${cfg.authority}/${cfg.tenantId}/oauth2/v2.0/token`
+  const params: Record<string, string> = {
+    client_id: cfg.clientId,
+    scope,
+  }
+  if (cfg.authType === 'password') {
+    params.grant_type = 'password'
+    params.username = cfg.username!
+    params.password = cfg.password!
+  } else {
+    params.grant_type = 'client_credentials'
+    params.client_secret = cfg.clientSecret
+  }
+
   const res = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: cfg.clientId,
-      client_secret: cfg.clientSecret,
-      scope: `${resource}/.default`,
-    }),
+    body: new URLSearchParams(params),
   })
 
   if (!res.ok) {

@@ -1,7 +1,7 @@
 ﻿import fs from 'fs'
 import path from 'path'
 import { CLOUD_PRESETS, isCloudEnv } from './cloud'
-import type { CloudEnv, RuntimeConfig } from './types'
+import type { AuthType, CloudEnv, RuntimeConfig } from './types'
 import { isSafePbiUrl } from './validation'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
@@ -12,9 +12,12 @@ export interface Environment {
   id: string
   name: string
   cloud: CloudEnv
+  authType: AuthType
   tenantId: string
   clientId: string
   clientSecret: string
+  username?: string
+  password?: string
   authorityOverride?: string
   apiBaseOverride?: string
   resourceOverride?: string
@@ -36,8 +39,9 @@ function envFromEnvVars(): Environment {
   const cloud = process.env.PBI_CLOUD
   return {
     id: 'env-from-env',
-    name: '鐜鍙橀噺榛樿',
+    name: '环境变量默认',
     cloud: isCloudEnv(cloud) ? cloud : 'global',
+    authType: 'servicePrincipal',
     tenantId: process.env.PBI_TENANT_ID ?? '',
     clientId: process.env.PBI_CLIENT_ID ?? '',
     clientSecret: process.env.PBI_CLIENT_SECRET ?? '',
@@ -52,15 +56,19 @@ function readConfigFile(): ConfigFile {
         return {
           version: 2,
           activeEnvId: typeof saved.activeEnvId === 'string' ? saved.activeEnvId : undefined,
-          environments: saved.environments as Environment[],
+          environments: (saved.environments as Environment[]).map((e) => ({
+            ...e,
+            authType: e.authType ?? 'servicePrincipal',
+          })),
         }
       }
       // v1 鎵佸钩鏍煎紡 鈫?鑷姩杩佺Щ涓哄崟鐜
       if (saved && typeof saved === 'object' && 'tenantId' in saved) {
         const env: Environment = {
           id: newId(),
-          name: '榛樿鐜',
+          name: '默认环境',
           cloud: isCloudEnv(saved.cloud) ? saved.cloud : 'global',
+          authType: 'servicePrincipal',
           tenantId: String(saved.tenantId ?? ''),
           clientId: String(saved.clientId ?? ''),
           clientSecret: String(saved.clientSecret ?? ''),
@@ -118,9 +126,12 @@ export function saveEnvironment(input: Partial<Environment> & { id?: string }): 
   if (env) {
     env.name = (input.name ?? env.name).trim() || env.name
     if (isCloudEnv(input.cloud)) env.cloud = input.cloud
+    if (isAuthType(input.authType)) env.authType = input.authType
     env.tenantId = (input.tenantId ?? env.tenantId).trim()
     env.clientId = (input.clientId ?? env.clientId).trim()
     env.clientSecret = (input.clientSecret && input.clientSecret.trim()) || env.clientSecret
+    env.username = (input.username ?? env.username)?.trim() || undefined
+    env.password = (input.password && input.password.trim()) || env.password
     env.authorityOverride = authorityOverride
     env.apiBaseOverride = apiBaseOverride
     env.resourceOverride = resourceOverride
@@ -130,9 +141,12 @@ export function saveEnvironment(input: Partial<Environment> & { id?: string }): 
       id: input.id || newId(),
       name: (input.name ?? '').trim() || 'unnamed',
       cloud: isCloudEnv(input.cloud) ? input.cloud : 'global',
+      authType: isAuthType(input.authType) ? input.authType : 'servicePrincipal',
       tenantId: (input.tenantId ?? '').trim(),
       clientId: (input.clientId ?? '').trim(),
       clientSecret: (input.clientSecret ?? '').trim(),
+      username: input.username?.trim() || undefined,
+      password: input.password?.trim() || undefined,
       authorityOverride,
       apiBaseOverride,
       resourceOverride,
@@ -179,9 +193,12 @@ export async function resolveRuntime(): Promise<RuntimeConfig> {
     envId: env?.id ?? '',
     envName: env?.name ?? '',
     cloud: env?.cloud ?? 'global',
+    authType: env?.authType ?? 'servicePrincipal',
     tenantId: env?.tenantId ?? '',
     clientId: env?.clientId ?? '',
     clientSecret: env?.clientSecret ?? '',
+    username: env?.username,
+    password: env?.password,
     authority: authorityOverride || preset.authority,
     apiBase: apiBaseOverride || preset.apiBase,
     resource: resourceOverride || preset.resource,
@@ -189,27 +206,37 @@ export async function resolveRuntime(): Promise<RuntimeConfig> {
   }
 }
 
-/** 鏍￠獙閰嶇疆鏄惁瀹屾暣 */
 export function configReady(cfg: RuntimeConfig): boolean {
-  return Boolean(cfg.tenantId && cfg.clientId && cfg.clientSecret)
+  const hasTenant = Boolean(cfg.tenantId && cfg.clientId)
+  if (cfg.authType === 'password') return Boolean(hasTenant && cfg.username && cfg.password)
+  return Boolean(hasTenant && cfg.clientSecret)
 }
 
 /** 杩斿洖缁欏墠绔殑鐜淇℃伅锛堝瘑閽ヨ劚鏁忥級 */
 export function maskEnvironment(e: Environment) {
   const secretLen = e.clientSecret.length
+  const pwdLen = e.password?.length ?? 0
   return {
     id: e.id,
     name: e.name,
     cloud: e.cloud,
+    authType: e.authType ?? 'servicePrincipal',
     tenantId: e.tenantId,
     clientId: e.clientId,
+    username: e.username ?? '',
     authorityOverride: e.authorityOverride ?? '',
     apiBaseOverride: e.apiBaseOverride ?? '',
     resourceOverride: e.resourceOverride ?? '',
     xmlaEndpointOverride: e.xmlaEndpointOverride ?? '',
     hasSecret: secretLen > 0,
-    secretPreview: secretLen > 0 ? `鈥⑩€⑩€⑩€?{e.clientSecret.slice(-4)}` : '',
+    secretPreview: secretLen > 0 ? `••••${e.clientSecret.slice(-4)}` : '',
+    hasPassword: pwdLen > 0,
+    passwordPreview: pwdLen > 0 ? '••••已保存' : '',
   }
+}
+
+function isAuthType(v: unknown): v is AuthType {
+  return v === 'servicePrincipal' || v === 'password'
 }
 function normalizeOverride(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null || value === '') return undefined

@@ -1,10 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Allow CI/local verification to build away from a running dev server's .next directory.
-  distDir:
-    process.env.NEXT_DIST_DIR ||
-    (process.env.NODE_ENV === 'production' ? '.next-build' : '.next'),
-  // Docker 镜像使用 distDir 下的 standalone 产物，本地 npm start 不受影响
+  // 统一用 .next 目录，避免 distDir 分裂导致 start 找不到 build 产物
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   output: 'standalone',
 };
 
