@@ -16,7 +16,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: '缺少 wid 或 did 参数' }, { status: 400 })
     }
     const force = req.nextUrl.searchParams.get('force') === '1'
-    return NextResponse.json(await getDatasetTablesDetailed(wid, did, { fast: true, force }))
+    return NextResponse.json(await getDatasetTablesDetailed(wid, did, { force }))
   } catch (e) {
     return fail(e)
   }

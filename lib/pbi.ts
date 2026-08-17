@@ -95,60 +95,10 @@ compressionRegistry.set(CompressionType.LZ4_FRAME, {
 })
 
 /**
- * 世纪互联的 executeDaxQueries 使用 Arrow IPC 返回结果，不能复用
- * executeQueries 的 JSON 解析。这里按官方接口格式执行 DAX，并把 Arrow
- * 行转换成平台统一的表清单。
+ * 世纪互联的 executeDaxQueries 使用 Arrow IPC 返回结果。
+ * executeDaxQuery 是通用的 DAX 查询执行函数（原始视图，不重命名列），
+ * 表清单和结构查询共用它。
  */
-async function executeDaxTableCatalog(workspaceId: string, datasetId: string): Promise<PbiTable[]> {
-  const dax = `
-EVALUATE
-SELECTCOLUMNS(
-  INFO.VIEW.TABLES(),
-  "TableName", [Name],
-  "IsHidden", [IsHidden]
-)
-ORDER BY [TableName]`
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 30_000)
-  let response: Response
-  try {
-    response = await pbiRequest(
-    '/groups/' + workspaceId + '/datasets/' + datasetId + '/executeDaxQueries',
-    {
-      method: 'POST',
-      headers: { Accept: 'application/vnd.apache.arrow.stream' },
-      body: JSON.stringify({ query: dax, queryTimeout: 120, resultSetRowCountLimit: 10000 }),
-      signal: controller.signal,
-    },
-    )
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new PbiError(504, 'DAX 表清单查询超时', 'DAX_QUERY_TIMEOUT')
-    }
-    throw error
-  } finally {
-    clearTimeout(timer)
-  }
-  if (!response.ok) throw await toPbiError(response)
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (!bytes.length) return []
-  const table = tableFromIPC(bytes)
-  const metadata = table.schema.metadata
-  if (metadata?.get('IsError') === 'true') {
-    throw new PbiError(422, metadata.get('FaultString') ?? 'DAX 查询失败', 'DAX_QUERY_ERROR')
-  }
-  return table.toArray().map((row) => {
-    const value = row as Record<string, unknown>
-    const rawName = String(value.TableName ?? value['[TableName]'] ?? value.Name ?? value['[Name]'] ?? '')
-    // The China cloud Arrow endpoint can expose UTF-8 bytes as Latin-1 text in
-    // apache-arrow JS (for example `日期` becomes `æ—¥æœŸ`). Repair only when
-    // the conversion produces CJK text, so ordinary ASCII/Latin names stay intact.
-    const repairedName = Buffer.from(rawName, 'latin1').toString('utf8')
-    const name = /[\u3400-\u9fff]/u.test(repairedName) ? repairedName : rawName
-    const hidden = value.IsHidden ?? value['[IsHidden]']
-    return { name, isHidden: hidden === true || hidden === 1 || hidden === 'true' }
-  }).filter((row) => row.name)
-}
 
 export async function getDatasetName(workspaceId: string, datasetId: string): Promise<string> {
   const detail = await pbiJson<{ name?: string }>('/groups/' + workspaceId + '/datasets/' + datasetId)
@@ -550,7 +500,6 @@ export async function getDatasetTablesDetailed(
     const cached = loadDatasetTables(activeEnvId(), workspaceId, datasetId)
     if (cached) return cached as DatasetTablesResult
   }
-  let daxError: PbiError | null = null
   try {
     const data = await pbiJson<{ value: PbiTable[] }>('/groups/' + workspaceId + '/datasets/' + datasetId + '/tables')
     if (Array.isArray(data.value)) {
@@ -561,22 +510,28 @@ export async function getDatasetTablesDetailed(
   } catch (e) {
     if (!(e instanceof PbiError) || ![400, 404].includes(e.status)) throw e
   }
+  // DAX 查询：和结构用同一个 executeDaxQuery（原始视图，不重命名列）
   try {
-    const tables = await executeDaxTableCatalog(workspaceId, datasetId)
+    const rows = await executeDaxQuery(workspaceId, datasetId, 'EVALUATE TOPN(500, INFO.VIEW.TABLES())')
+    const tables: PbiTable[] = rows
+      .map((v): PbiTable | null => {
+        const rawName = String(v['[Name]'] ?? '')
+        if (!rawName) return null
+        const repaired = Buffer.from(rawName, 'latin1').toString('utf8')
+        const name = /[\u3400-\u9fff]/u.test(repaired) ? repaired : rawName
+        const hidden = v['[IsHidden]']
+        return { name, isHidden: hidden === true || hidden === 1 || hidden === 'true' }
+      })
+      .filter((t): t is PbiTable => t !== null && Boolean(t.name))
     if (tables.length > 0) {
       const result = { tables, source: 'dax' as const, fetchedAt: fetchedAt() }
-      saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables, fetchedAt: result.fetchedAt })
+      saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables: result.tables, fetchedAt: result.fetchedAt })
       return result
     }
   } catch (e) {
     if (!(e instanceof PbiError) || ![400, 401, 403, 404, 422, 504].includes(e.status)) throw e
-    daxError = e
   }
-  // 刷新弹窗只需要快速表清单。不要在 DAX 失败后继续等待耗时的
-  // Admin Scanner/XMLA 探测，否则前端会长时间停留在“正在加载”。
-  if (options.fast) {
-    throw daxError ?? new PbiError(404, '没有获取到数据集表清单')
-  }
+  // DAX 失败后回退到 getDatasetSchema（它内部也用 executeDaxQuery 查三个视图）
   try {
     const schema = await getDatasetSchema(workspaceId, datasetId)
     if (schema.tables.length > 0) {
