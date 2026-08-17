@@ -156,6 +156,113 @@ export async function getDatasetName(workspaceId: string, datasetId: string): Pr
   return detail.name
 }
 
+/** 用 executeQueries DAX 目录查询获取完整 Schema（表/列/度量值），无需管理 API 权限 */
+async function executeDaxSchema(workspaceId: string, datasetId: string): Promise<DatasetSchema> {
+  // 世纪互联只允许一次一个查询，分三次执行
+  // 不用 SELECTCOLUMNS 重命名，直接查原始视图，按方括号字段名取值
+  const tablesDax = `EVALUATE TOPN(500, INFO.VIEW.TABLES())`
+  const columnsDax = `EVALUATE TOPN(5000, INFO.VIEW.COLUMNS())`
+  const measuresDax = `EVALUATE TOPN(2000, INFO.VIEW.MEASURES())`
+
+  const [tableRows, columnRows, measureRows] = await Promise.all([
+    executeDaxQuery(workspaceId, datasetId, tablesDax),
+    executeDaxQuery(workspaceId, datasetId, columnsDax).catch(() => []),
+    executeDaxQuery(workspaceId, datasetId, measuresDax).catch(() => []),
+  ])
+
+  const tablesMap = new Map<string, SchemaTable>()
+  const columnsByTable = new Map<string, SchemaColumn[]>()
+  const measuresByTable = new Map<string, SchemaMeasure[]>()
+
+  // 表
+  for (const v of tableRows) {
+    const rawName = String(v['[Name]'] ?? '')
+    if (!rawName) continue
+    const repaired = Buffer.from(rawName, 'latin1').toString('utf8')
+    const name = /[\u3400-\u9fff]/u.test(repaired) ? repaired : rawName
+    if (!tablesMap.has(name)) {
+      tablesMap.set(name, { name, isHidden: v['[IsHidden]'] === true || v['[IsHidden]'] === 1 })
+    }
+  }
+  // 列
+  for (const v of columnRows) {
+    const rawTable = String(v['[Table]'] ?? '')
+    if (!rawTable) continue
+    const repairedTable = Buffer.from(rawTable, 'latin1').toString('utf8')
+    const tableName = /[\u3400-\u9fff]/u.test(repairedTable) ? repairedTable : rawTable
+    const rawCol = v['[Name]']
+    if (!rawCol) continue
+    const colRepaired = Buffer.from(String(rawCol), 'latin1').toString('utf8')
+    const colName = /[\u3400-\u9fff]/u.test(colRepaired) ? colRepaired : String(rawCol)
+    if (!columnsByTable.has(tableName)) columnsByTable.set(tableName, [])
+    columnsByTable.get(tableName)!.push({
+      name: colName,
+      dataType: v['[DataType]'] ? String(v['[DataType]']) : v['[Type]'] ? String(v['[Type]']) : undefined,
+    })
+  }
+  // 度量值
+  for (const v of measureRows) {
+    const rawTable = String(v['[Table]'] ?? '')
+    if (!rawTable) continue
+    const repairedTable = Buffer.from(rawTable, 'latin1').toString('utf8')
+    const tableName = /[\u3400-\u9fff]/u.test(repairedTable) ? repairedTable : rawTable
+    const measureName = v['[Name]']
+    if (!measureName) continue
+    if (!measuresByTable.has(tableName)) measuresByTable.set(tableName, [])
+    measuresByTable.get(tableName)!.push({
+      name: String(measureName),
+      expression: v['[Expression]'] ? String(v['[Expression]']) : undefined,
+    })
+  }
+
+  const tables = Array.from(tablesMap.values()).map((t) => ({
+    ...t,
+    columns: columnsByTable.get(t.name) ?? [],
+    measures: measuresByTable.get(t.name) ?? [],
+  }))
+
+  return {
+    tables,
+    expressions: [],
+    measureCount: tables.reduce((n, t) => n + (t.measures?.length ?? 0), 0),
+    columnCount: tables.reduce((n, t) => n + (t.columns?.length ?? 0), 0),
+  }
+}
+
+/** 执行单个 DAX 查询并返回行数组 */
+async function executeDaxQuery(workspaceId: string, datasetId: string, dax: string): Promise<Record<string, unknown>[]> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30_000)
+  let response: Response
+  try {
+    response = await pbiRequest(
+      '/groups/' + workspaceId + '/datasets/' + datasetId + '/executeDaxQueries',
+      {
+        method: 'POST',
+        headers: { Accept: 'application/vnd.apache.arrow.stream' },
+        body: JSON.stringify({ query: dax, queryTimeout: 120, resultSetRowCountLimit: 50000 }),
+        signal: controller.signal,
+      },
+    )
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new PbiError(504, 'DAX 查询超时', 'DAX_QUERY_TIMEOUT')
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!response.ok) throw await toPbiError(response)
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (!bytes.length) return []
+  const table = tableFromIPC(bytes)
+  const metadata = table.schema.metadata
+  if (metadata?.get('IsError') === 'true') {
+    throw new PbiError(422, metadata.get('FaultString') ?? 'DAX 查询失败', 'DAX_QUERY_ERROR')
+  }
+  return table.toArray() as unknown as Record<string, unknown>[]
+}
+
 async function toPbiError(res: Response): Promise<PbiError> {
   const text = await res.text().catch(() => '')
   let message = text || res.statusText
@@ -681,10 +788,18 @@ export async function ensureWorkspaceSchema(workspaceId: string): Promise<Map<st
 
 /** 获取单个数据集的完整 Schema（表/列/度量值），未缓存时扫描整个工作区 */
 export async function getDatasetSchema(workspaceId: string, datasetId: string): Promise<DatasetSchema> {
+  // 1) 优先用 executeQueries DAX 目录查询（无需管理 API，需 Build 权限）
+  try {
+    const schema = await executeDaxSchema(workspaceId, datasetId)
+    if (schema.tables.length > 0) return schema
+  } catch (e) {
+    if (!(e instanceof PbiError) || ![400, 401, 403, 404, 422, 504].includes(e.status)) throw e
+  }
+  // 2) 回退 getInfo admin 扫描（需管理 API 权限）
   const datasets = await ensureWorkspaceSchema(workspaceId)
   const schema = datasets.get(datasetId)
   if (!schema) {
-    throw new PbiError(404, `扫描结果中未找到该数据集的 Schema（数据集可能不支持 Schema 提取，或为推送/流式数据集）`)
+    throw new PbiError(404, `无法获取数据集结构：DAX 目录查询和管理 API 扫描均失败。请确认服务主体有 Build 权限（DAX 查询）或管理 API 权限（getInfo 扫描）。`)
   }
   return schema
 }

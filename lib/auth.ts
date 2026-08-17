@@ -97,6 +97,9 @@ export async function getAccessToken(force = false): Promise<string> {
     params.grant_type = 'password'
     params.username = cfg.username!
     params.password = cfg.password!
+    // ROPC 走公共客户端流程，不带 client_secret
+    // scope 用具体的委托权限而非 .default
+    params.scope = 'offline_access https://analysis.windows.net/powerbi/api/.default'
   } else {
     params.grant_type = 'client_credentials'
     params.client_secret = cfg.clientSecret
