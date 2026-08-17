@@ -14,6 +14,7 @@ import type { TenantSnapshot, WorkspaceView } from '@/lib/types'
 export default function WorkspacesPage() {
   const router = useRouter()
   const [keyword, setKeyword] = useState('')
+  const [pageSize, setPageSize] = useState(20)
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
     fetcher,
@@ -70,7 +71,7 @@ export default function WorkspacesPage() {
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
-        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
+        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
         columns={[
           {
             title: '名称',

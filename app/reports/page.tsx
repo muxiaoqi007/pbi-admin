@@ -14,6 +14,7 @@ import type { PbiAdminUser, PbiReportPage, ReportView, TenantSnapshot } from '@/
 
 export default function ReportsPage() {
   const [keyword, setKeyword] = useState('')
+  const [pageSize, setPageSize] = useState(20)
   const [usersReport, setUsersReport] = useState<ReportView | null>(null)
   const [datasourceReport, setDatasourceReport] = useState<ReportView | null>(null)
   const [pagesReport, setPagesReport] = useState<ReportView | null>(null)
@@ -93,7 +94,7 @@ export default function ReportsPage() {
         rowKey={(r) => `${r.workspaceId}:${r.id}`}
         loading={isLoading}
         dataSource={filtered}
-        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 张` }}
+        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 张`, onShowSizeChange: (_, size) => setPageSize(size) }}
         columns={[
           { title: '报表', dataIndex: 'name', ellipsis: true },
           { title: '工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },

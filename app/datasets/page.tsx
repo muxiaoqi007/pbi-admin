@@ -24,6 +24,7 @@ interface BatchResult {
 export default function DatasetsPage() {
   const { message, modal } = App.useApp()
   const [keyword, setKeyword] = useState('')
+  const [pageSize, setPageSize] = useState(20)
   const [datasourceDataset, setDatasourceDataset] = useState<DatasetView | null>(null)
   const [reportsDataset, setReportsDataset] = useState<DatasetView | null>(null)
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
@@ -146,7 +147,7 @@ export default function DatasetsPage() {
           onChange: setSelected,
           getCheckboxProps: (d) => ({ disabled: !d.isRefreshable }),
         }}
-        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
+        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
         columns={[
           { title: '数据集', dataIndex: 'name', ellipsis: true },
           { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true },
