@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
 import { getReportPages } from '@/lib/pbi'
+import { isSafeId } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,7 +10,7 @@ export async function GET(req: NextRequest) {
   try {
     const wid = req.nextUrl.searchParams.get('wid')
     const rid = req.nextUrl.searchParams.get('rid')
-    if (!wid || !rid) {
+    if (!isSafeId(wid) || !isSafeId(rid)) {
       return NextResponse.json({ error: '缺少 wid 或 rid 参数' }, { status: 400 })
     }
     const pages = await getReportPages(wid, rid)

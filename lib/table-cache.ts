@@ -2,8 +2,19 @@
 
 const KEY = 'pbi-admin:table-cache'
 
-/** 缓存结构：datasetId → { tables: string[], savedAt: number } */
-type CacheMap = Record<string, { tables: string[]; savedAt: number }>
+export type TableCacheSource = 'api' | 'manual' | 'legacy'
+export interface TableCacheSnapshot {
+  tables: string[]
+  savedAt: number
+  source: TableCacheSource
+}
+type CacheEntry = { api?: TableCacheSnapshot; manual?: TableCacheSnapshot }
+type LegacyEntry = { tables?: string[]; savedAt?: number }
+type CacheMap = Record<string, CacheEntry | LegacyEntry>
+
+function cacheKey(environmentId: string, datasetId: string): string {
+  return environmentId + ':' + datasetId
+}
 
 function load(): CacheMap {
   if (typeof window === 'undefined') return {}
@@ -18,26 +29,47 @@ function save(map: CacheMap) {
   try {
     localStorage.setItem(KEY, JSON.stringify(map))
   } catch {
-    /* localStorage 不可用时静默忽略 */
+    // localStorage unavailable
   }
 }
 
-/** 读取某个数据集缓存的表名（不限时效，手动保存的表名长期有效） */
-export function getCachedTables(datasetId: string): string[] {
-  return load()[datasetId]?.tables ?? []
+function normalize(entry?: CacheEntry | LegacyEntry): CacheEntry {
+  if (!entry) return {}
+  const legacy = entry as LegacyEntry
+  if (Array.isArray(legacy.tables)) {
+    return { manual: { tables: legacy.tables, savedAt: legacy.savedAt ?? 0, source: 'legacy' } }
+  }
+  return entry as CacheEntry
 }
 
-/** 保存某个数据集的表名缓存（API 拿到表清单时自动调用，手动输入时也调用） */
-export function setCachedTables(datasetId: string, tables: string[]) {
-  if (!datasetId || tables.length === 0) return
+export function getTableCache(environmentId: string, datasetId: string): CacheEntry {
+  if (!environmentId || !datasetId) return {}
+  return normalize(load()[cacheKey(environmentId, datasetId)])
+}
+
+export function getCachedTables(environmentId: string, datasetId: string): string[] {
+  const entry = getTableCache(environmentId, datasetId)
+  return Array.from(new Set([...(entry.api?.tables ?? []), ...(entry.manual?.tables ?? [])]))
+}
+
+export function setCachedTables(
+  environmentId: string,
+  datasetId: string,
+  tables: string[],
+  source: 'api' | 'manual' = 'manual',
+) {
+  if (!environmentId || !datasetId || tables.length === 0) return
   const map = load()
-  map[datasetId] = { tables, savedAt: Date.now() }
+  const key = cacheKey(environmentId, datasetId)
+  const entry = normalize(map[key])
+  const clean = Array.from(new Set(tables.map((x) => x.trim()).filter(Boolean)))
+  entry[source] = { tables: clean, savedAt: Date.now(), source }
+  map[key] = entry
   save(map)
 }
 
-/** 清除某个数据集的表名缓存 */
-export function clearCachedTables(datasetId: string) {
+export function clearCachedTables(environmentId: string, datasetId: string) {
   const map = load()
-  delete map[datasetId]
+  delete map[cacheKey(environmentId, datasetId)]
   save(map)
 }

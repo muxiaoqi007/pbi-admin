@@ -8,6 +8,56 @@ interface TokenCache {
 
 let cache: TokenCache | null = null
 
+export interface AccessTokenDiagnostics {
+  authType: 'service_principal' | 'delegated_user' | 'unknown'
+  tokenVersion?: string
+  audience?: string
+  issuer?: string
+  tenantId?: string
+  clientId?: string
+  /** Microsoft Entra service-principal object ID (the token's oid claim). */
+  objectId?: string
+  roles: string[]
+  scopes: string[]
+}
+
+function decodeTokenDiagnostics(token: string): AccessTokenDiagnostics {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+    ) as Record<string, unknown>
+    const roles = Array.isArray(payload.roles)
+      ? payload.roles.filter((value): value is string => typeof value === 'string')
+      : []
+    const scopes = typeof payload.scp === 'string' ? payload.scp.split(' ').filter(Boolean) : []
+    return {
+      authType:
+        payload.idtyp === 'user' ||
+        typeof payload.upn === 'string' ||
+        typeof payload.preferred_username === 'string'
+          ? 'delegated_user'
+          : roles.length > 0 || payload.appid || payload.azp
+            ? 'service_principal'
+            : 'unknown',
+      tokenVersion: typeof payload.ver === 'string' ? payload.ver : undefined,
+      audience: typeof payload.aud === 'string' ? payload.aud : undefined,
+      issuer: typeof payload.iss === 'string' ? payload.iss : undefined,
+      tenantId: typeof payload.tid === 'string' ? payload.tid : undefined,
+      clientId:
+        typeof payload.appid === 'string'
+          ? payload.appid
+          : typeof payload.azp === 'string'
+            ? payload.azp
+            : undefined,
+      objectId: typeof payload.oid === 'string' ? payload.oid : undefined,
+      roles,
+      scopes,
+    }
+  } catch {
+    return { authType: 'unknown', roles: [], scopes: [] }
+  }
+}
+
 /**
  * client_credentials 获取访问令牌。
  * 使用 v2 端点（/oauth2/v2.0/token + scope 参数），与 MSAL
@@ -63,4 +113,9 @@ export async function getAccessToken(force = false): Promise<string> {
 /** 配置变更后使缓存失效 */
 export function invalidateToken() {
   cache = null
+}
+
+/** Return non-secret claims for the currently configured token. */
+export async function getAccessTokenDiagnostics(force = false): Promise<AccessTokenDiagnostics> {
+  return decodeTokenDiagnostics(await getAccessToken(force))
 }

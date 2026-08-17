@@ -2,19 +2,24 @@ import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
 import { triggerRefresh, type RefreshRequest } from '@/lib/pbi'
 import { REFRESH_TYPES } from '@/lib/types'
+import { isPlainObject, isSafeId } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
 
 /** 触发刷新：{workspaceId, datasetId, mode: 'all'|'allEnhanced'|'tables', tables?, type?, retryCount?, maxParallelism?, commitMode?, applyRefreshPolicy?, effectiveDate?} */
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as Partial<RefreshRequest>
-    if (!body.workspaceId || !body.datasetId) {
+    const raw = await req.json().catch(() => null)
+    if (!isPlainObject(raw)) {
+      return NextResponse.json({ error: '请求体必须是 JSON 对象' }, { status: 400 })
+    }
+    const body = raw as Partial<RefreshRequest>
+    if (!isSafeId(body.workspaceId) || !isSafeId(body.datasetId)) {
       return NextResponse.json({ error: '缺少 workspaceId 或 datasetId' }, { status: 400 })
     }
     const mode: RefreshRequest['mode'] =
       body.mode === 'allEnhanced' || body.mode === 'tables' ? body.mode : 'all'
-    if (mode === 'tables' && (!body.tables || body.tables.length === 0)) {
+    if (mode === 'tables' && (!Array.isArray(body.tables) || body.tables.length === 0)) {
       return NextResponse.json({ error: '选表刷新至少需要选择或输入一张表' }, { status: 400 })
     }
     const type =
@@ -24,7 +29,9 @@ export async function POST(req: NextRequest) {
       workspaceId: body.workspaceId,
       datasetId: body.datasetId,
       mode,
-      tables: body.tables?.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()),
+      tables: Array.isArray(body.tables)
+        ? body.tables.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 500)
+        : undefined,
       type,
       retryCount: clampInt(body.retryCount, 0, 10),
       maxParallelism: clampInt(body.maxParallelism, 1, 30),

@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button, Card, Descriptions, Space, Table, Tabs, Tag, Typography } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
@@ -13,10 +13,15 @@ import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import type { DatasetView, TenantSnapshot } from '@/lib/types'
 
-export default function WorkspaceDetailPage({ params }: { params: { id: string } }) {
+export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter()
+  const [workspaceId, setWorkspaceId] = useState('')
   const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
+
+  useEffect(() => {
+    params.then(({ id }) => setWorkspaceId(id))
+  }, [params])
 
   const { data, error, isLoading, mutate } = useSWR<TenantSnapshot>(
     '/api/snapshot',
@@ -24,14 +29,14 @@ export default function WorkspaceDetailPage({ params }: { params: { id: string }
     { keepPreviousData: true },
   )
 
-  const workspace = data?.workspaces.find((w) => w.id === params.id)
+  const workspace = data?.workspaces.find((w) => w.id === workspaceId)
   const reports = useMemo(
-    () => (data?.reports ?? []).filter((r) => r.workspaceId === params.id),
-    [data, params.id],
+    () => (data?.reports ?? []).filter((r) => r.workspaceId === workspaceId),
+    [data, workspaceId],
   )
   const datasets = useMemo(
-    () => (data?.datasets ?? []).filter((d) => d.workspaceId === params.id),
-    [data, params.id],
+    () => (data?.datasets ?? []).filter((d) => d.workspaceId === workspaceId),
+    [data, workspaceId],
   )
 
   if (error && !data) {
@@ -57,14 +62,14 @@ export default function WorkspaceDetailPage({ params }: { params: { id: string }
           返回
         </Button>
         <Typography.Title level={4} style={{ margin: 0 }}>
-          {workspace?.name ?? (isLoading ? '加载中…' : params.id)}
+          {workspace?.name ?? (isLoading ? '加载中…' : workspaceId)}
         </Typography.Title>
       </Space>
 
       <Card style={{ marginBottom: 16 }}>
         <Descriptions column={3} size="small">
           <Descriptions.Item label="工作区 ID">
-            <Typography.Text copyable style={{ fontSize: 12 }}>{params.id}</Typography.Text>
+            <Typography.Text copyable style={{ fontSize: 12 }}>{workspaceId}</Typography.Text>
           </Descriptions.Item>
           <Descriptions.Item label="类型">{workspace?.type ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="状态">{workspace?.state ?? '-'}</Descriptions.Item>

@@ -51,7 +51,9 @@ export default function DatasourcesModal({
       {datasetId && error && <p className="text-error">{String(error.message ?? error)}</p>}
       {datasetId && (
         <Table
-          rowKey={(d) => `${d.datasourceType}-${d.datasourceId ?? d.name ?? Math.random()}`}
+          rowKey={(d, index) =>
+            `${d.datasourceType}-${d.datasourceId ?? d.name ?? 'datasource'}-${index}`
+          }
           loading={isLoading}
           dataSource={data?.datasources ?? []}
           pagination={false}

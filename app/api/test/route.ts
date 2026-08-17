@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getAccessToken } from '@/lib/auth'
 import { fail } from '@/lib/api'
-import { getTenantSnapshot } from '@/lib/pbi'
+import { getConnectionDiagnostics, getTenantSnapshot } from '@/lib/pbi'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,15 +9,18 @@ export const dynamic = 'force-dynamic'
 export async function POST() {
   try {
     const token = await getAccessToken(true)
+    const diagnostics = await getConnectionDiagnostics(false)
     const snapshot = await getTenantSnapshot(true)
     return NextResponse.json({
       ok: true,
-      tokenPreview: `${token.slice(0, 12)}...`,
+      tokenAcquired: Boolean(token),
       mode: snapshot.mode,
+      adminFallbackReason: snapshot.adminFallbackReason,
       workspaceCount: snapshot.workspaces.length,
       reportCount: snapshot.reports.length,
       datasetCount: snapshot.datasets.length,
       fetchedAt: snapshot.fetchedAt,
+      diagnostics,
     })
   } catch (e) {
     return fail(e)

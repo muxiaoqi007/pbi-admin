@@ -5,7 +5,12 @@ import { Alert, App, Button, Card, Select, Space, Table, Tag, Typography } from 
 import useSWR from 'swr'
 import ErrorAlert from '@/components/ErrorAlert'
 import { fetcher, postJSON } from '@/lib/client'
-import type { TenantSnapshot } from '@/lib/types'
+import type { TenantSnapshot, WorkspaceView } from '@/lib/types'
+
+interface ToolRow extends WorkspaceView {
+  spJoined: boolean
+  spRole?: string
+}
 
 /** 批量把当前配置的服务主体加入工作区（触发刷新的前置条件） */
 export default function ToolsPage() {
@@ -13,27 +18,38 @@ export default function ToolsPage() {
   const [selected, setSelected] = useState<React.Key[]>([])
   const [role, setRole] = useState<'Admin' | 'Member' | 'Contributor'>('Admin')
   const [running, setRunning] = useState(false)
-  const [result, setResult] = useState<{ added: number; failures: { workspaceId: string; error: string }[] } | null>(null)
-
-  const { data: configData } = useSWR<{ activeEnv?: { clientId: string } }>(
-    '/api/config',
-    fetcher,
-  )
+  const [result, setResult] = useState<{
+    added: number
+    unchanged: number
+    failures: { workspaceId: string; error: string }[]
+  } | null>(null)
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
     fetcher,
     { keepPreviousData: true },
   )
 
-  const clientId = configData?.activeEnv?.clientId ?? ''
   const memberMode = data?.mode === 'member'
 
-  const rows = useMemo(() => {
+  const rows = useMemo<ToolRow[]>(() => {
+    const objectId = data?.activePrincipalObjectId?.toLowerCase()
     return (data?.workspaces ?? []).map((w) => ({
       ...w,
-      spJoined: w.users.some((u) => u.principalType === 'App' && u.identifier === clientId),
+      ...(() => {
+        const principal = objectId
+          ? w.users.find(
+              (u) =>
+                u.principalType?.toLowerCase() === 'app' &&
+                u.identifier.toLowerCase() === objectId,
+            )
+          : undefined
+        return {
+          spJoined: Boolean(principal),
+          spRole: principal?.groupUserAccessRight,
+        }
+      })(),
     }))
-  }, [data, clientId])
+  }, [data])
 
   async function run() {
     if (selected.length === 0) {
@@ -43,16 +59,26 @@ export default function ToolsPage() {
     setRunning(true)
     setResult(null)
     try {
-      const res = await postJSON<{ ok: boolean; added: number; failures: { workspaceId: string; error: string }[] }>(
+      const res = await postJSON<{
+        ok: boolean
+        added: number
+        unchanged: number
+        failures: { workspaceId: string; error: string }[]
+      }>(
         '/api/tools/sp-workspaces',
         { workspaceIds: selected, role },
       )
       setResult(res)
       if (res.ok) {
-        message.success(`已成功加入 ${res.added} 个工作区`)
+        message.success(
+          res.added > 0
+            ? `已成功加入 ${res.added} 个工作区`
+            : `所选工作区均已存在该服务主体，无需重复加入`,
+        )
       } else {
         message.warning(`完成，但 ${res.failures.length} 个工作区失败，详见下方明细`)
       }
+      setSelected([])
       // 重新拉快照以反映成员变化
       mutate(() => fetcher('/api/snapshot?force=1'))
     } catch (e) {
@@ -64,48 +90,26 @@ export default function ToolsPage() {
 
   const notJoined = rows.filter((r) => !r.spJoined)
 
-  if (memberMode) {
-    return (
-      <div style={{ maxWidth: 1000 }}>
-        <Alert
-          type="warning"
-          showIcon
-          message="成员模式下此功能不可用"
-          description={
-            <div>
-              <p style={{ margin: '4px 0' }}>
-                当前云的管理 API 不支持服务主体（世纪互联即如此），无法通过工具批量把服务主体加入工作区。
-              </p>
-              <p style={{ margin: '4px 0' }}>
-                替代做法：让各工作区管理员在 Power BI 服务中打开「工作区 → 访问权限 → 添加人员」，
-                输入服务主体的名称或客户端 ID（
-                <Typography.Text code>{clientId || '见设置页'}</Typography.Text>
-                ），角色给「参与者」或「管理员」。加入后该工作区即可触发刷新。
-              </p>
-            </div>
-          }
-        />
-      </div>
-    )
-  }
-
   return (
     <div style={{ maxWidth: 1000 }}>
       <Alert
-        type="info"
+        type={memberMode ? 'warning' : 'info'}
         showIcon
         style={{ marginBottom: 16 }}
-        message="把服务主体批量加入工作区"
+        message={memberMode ? '当前为成员视图，可继续检查和管理可见工作区' : '把服务主体批量加入工作区'}
         description={
           <div>
             <p style={{ margin: '4px 0' }}>
-              Power BI 没有以管理员身份直接触发刷新的 API：调用刷新接口的服务主体必须是目标工作区的成员。
-              本工具会把「设置」页中配置的服务主体（客户端 ID：
-              <Typography.Text code>{clientId || '未配置'}</Typography.Text>
-              ）按所选角色批量加入勾选的工作区，加入后即可在「数据集」页触发刷新、读取表清单。
+              {memberMode
+                ? '租户 Admin API 当前不可用，但普通工作区 API 仍然可用。下面会按访问令牌中的服务主体对象 ID 识别其现有角色；对尚未直接加入的可见工作区，将使用 /groups/{groupId}/users 尝试添加。'
+                : '本工具会把「设置」页中配置的服务主体按所选角色批量加入工作区，加入后即可在「数据集」页触发刷新、读取表清单。'}
             </p>
             <p style={{ margin: '4px 0' }} className="text-muted">
-              建议使用 Admin 角色；如只需要刷新，Contributor 即可。当前未加入的工作区共 {notJoined.length} 个。
+              {memberMode
+                ? '成员视图只能枚举当前服务主体已经能够访问的工作区，无法发现完全不可见的工作区。普通工作区成员管理仍要求调用主体在目标工作区具有足够权限；失败时会显示 Power BI 返回的具体原因。'
+                : '建议使用 Admin 角色；如只需要刷新，Contributor 即可。'}
+              当前检测到已直接加入 {rows.length - notJoined.length} 个，未检测到直接成员关系 {notJoined.length} 个
+              （后者也可能是通过安全组获得访问权限）。
             </p>
           </div>
         }
@@ -136,7 +140,14 @@ export default function ToolsPage() {
           rowKey="id"
           loading={isLoading}
           dataSource={rows}
-          rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
+          rowSelection={{
+            selectedRowKeys: selected,
+            onChange: setSelected,
+            getCheckboxProps: (record) => ({
+              disabled: record.spJoined,
+              title: record.spJoined ? `已加入（${record.spRole ?? '角色未知'}）` : undefined,
+            }),
+          }}
           pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个` }}
           columns={[
             { title: '工作区', dataIndex: 'name', ellipsis: true },
@@ -151,7 +162,8 @@ export default function ToolsPage() {
                 { text: '未加入', value: false },
               ],
               onFilter: (v, r) => r.spJoined === v,
-              render: (v: boolean) => (v ? <Tag color="green">已加入</Tag> : <Tag>未加入</Tag>),
+              render: (v: boolean, row: ToolRow) =>
+                v ? <Tag color="green">已加入 · {row.spRole ?? '角色未知'}</Tag> : <Tag>未直接加入</Tag>,
             },
           ]}
         />
@@ -165,8 +177,8 @@ export default function ToolsPage() {
           message={`成功 ${result.added} 个，失败 ${result.failures.length} 个`}
           description={
             <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {result.failures.map((f) => (
-                <li key={f.workspaceId}>
+              {result.failures.map((f, index) => (
+                <li key={`${f.workspaceId}-${index}`}>
                   <Typography.Text code>{f.workspaceId}</Typography.Text>：{f.error}
                 </li>
               ))}

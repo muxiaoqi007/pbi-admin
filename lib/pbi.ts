@@ -1,5 +1,12 @@
-import { getAccessToken } from './auth'
+﻿import { getAccessToken, getAccessTokenDiagnostics } from './auth'
+import { getDatasetSchemaViaXmla, XmlaError } from './xmla'
 import { getActiveEnvironment, resolveRuntime } from './config'
+import { tableFromIPC } from 'apache-arrow'
+import { compressionRegistry } from 'apache-arrow/ipc/compression/registry'
+import { CompressionType } from 'apache-arrow/fb/compression-type'
+import { decompress as decompressZstd } from 'fzstd'
+import lz4 from 'lz4js'
+import { getCatalogOverview, loadCatalogState, loadDatasetTables, saveCatalogState, saveDatasetCatalog, saveDatasetDatasources, saveDatasetTables } from './catalog-store'
 import type {
   DatasetSchema,
   DatasetView,
@@ -76,6 +83,77 @@ async function pbiJson<T>(path: string, init?: RequestInit & { forceToken?: bool
   }
   const text = await res.text()
   return text ? (JSON.parse(text) as T) : ({} as T)
+}
+
+// Power BI executeDaxQueries 的 Arrow 流会压缩字典批次。PyArrow 内置了
+// LZ4/ZSTD，而 apache-arrow JS 需要由调用方注册 codec。
+compressionRegistry.set(CompressionType.ZSTD, {
+  decode: (data) => decompressZstd(data),
+})
+compressionRegistry.set(CompressionType.LZ4_FRAME, {
+  decode: (data) => Uint8Array.from(lz4.decompress(data)),
+})
+
+/**
+ * 世纪互联的 executeDaxQueries 使用 Arrow IPC 返回结果，不能复用
+ * executeQueries 的 JSON 解析。这里按官方接口格式执行 DAX，并把 Arrow
+ * 行转换成平台统一的表清单。
+ */
+async function executeDaxTableCatalog(workspaceId: string, datasetId: string): Promise<PbiTable[]> {
+  const dax = `
+EVALUATE
+SELECTCOLUMNS(
+  INFO.VIEW.TABLES(),
+  "TableName", [Name],
+  "IsHidden", [IsHidden]
+)
+ORDER BY [TableName]`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30_000)
+  let response: Response
+  try {
+    response = await pbiRequest(
+    '/groups/' + workspaceId + '/datasets/' + datasetId + '/executeDaxQueries',
+    {
+      method: 'POST',
+      headers: { Accept: 'application/vnd.apache.arrow.stream' },
+      body: JSON.stringify({ query: dax, queryTimeout: 120, resultSetRowCountLimit: 10000 }),
+      signal: controller.signal,
+    },
+    )
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new PbiError(504, 'DAX 表清单查询超时', 'DAX_QUERY_TIMEOUT')
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!response.ok) throw await toPbiError(response)
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (!bytes.length) return []
+  const table = tableFromIPC(bytes)
+  const metadata = table.schema.metadata
+  if (metadata?.get('IsError') === 'true') {
+    throw new PbiError(422, metadata.get('FaultString') ?? 'DAX 查询失败', 'DAX_QUERY_ERROR')
+  }
+  return table.toArray().map((row) => {
+    const value = row as Record<string, unknown>
+    const rawName = String(value.TableName ?? value['[TableName]'] ?? value.Name ?? value['[Name]'] ?? '')
+    // The China cloud Arrow endpoint can expose UTF-8 bytes as Latin-1 text in
+    // apache-arrow JS (for example `日期` becomes `æ—¥æœŸ`). Repair only when
+    // the conversion produces CJK text, so ordinary ASCII/Latin names stay intact.
+    const repairedName = Buffer.from(rawName, 'latin1').toString('utf8')
+    const name = /[\u3400-\u9fff]/u.test(repairedName) ? repairedName : rawName
+    const hidden = value.IsHidden ?? value['[IsHidden]']
+    return { name, isHidden: hidden === true || hidden === 1 || hidden === 'true' }
+  }).filter((row) => row.name)
+}
+
+export async function getDatasetName(workspaceId: string, datasetId: string): Promise<string> {
+  const detail = await pbiJson<{ name?: string }>('/groups/' + workspaceId + '/datasets/' + datasetId)
+  if (!detail.name) throw new PbiError(404, '未找到数据集名称')
+  return detail.name
 }
 
 async function toPbiError(res: Response): Promise<PbiError> {
@@ -288,13 +366,17 @@ export async function getDatasetDatasources(datasetId: string, workspaceId?: str
   const primary = () =>
     preferMember ? listDatasourcesMember(workspaceId!, datasetId) : listDatasourcesAdmin(datasetId)
   try {
-    return await primary()
+    const list = await primary()
+    if (workspaceId) saveDatasetDatasources(activeEnvId(), workspaceId, datasetId, list, new Date().toISOString())
+    return list
   } catch (e) {
     if (e instanceof PbiError && [401, 403, 404].includes(e.status) && workspaceId) {
       const fallback = () =>
         preferMember ? listDatasourcesAdmin(datasetId) : listDatasourcesMember(workspaceId, datasetId)
       try {
-        return await fallback()
+        const list = await fallback()
+        saveDatasetDatasources(activeEnvId(), workspaceId, datasetId, list, new Date().toISOString())
+        return list
       } catch {
         throw e
       }
@@ -342,50 +424,76 @@ export async function getRefreshSchedule(workspaceId: string, datasetId: string)
  *  工作区成员不够，需要在数据集的「使用权限」里单独给服务主体授权，
  *  否则返回 401 PowerBINotAuthorizedException */
 export async function getDatasetTables(workspaceId: string, datasetId: string): Promise<PbiTable[]> {
+  return (await getDatasetTablesDetailed(workspaceId, datasetId)).tables
+}
+
+export interface DatasetTablesResult {
+  tables: PbiTable[]
+  source: 'rest' | 'schema' | 'dmv' | 'dax' | 'legacy'
+  fetchedAt: string
+}
+
+export async function getDatasetTablesDetailed(
+  workspaceId: string,
+  datasetId: string,
+  options: { fast?: boolean; force?: boolean } = {},
+): Promise<DatasetTablesResult> {
+  const fetchedAt = () => new Date().toISOString()
+  if (!options.force) {
+    const cached = loadDatasetTables(activeEnvId(), workspaceId, datasetId)
+    if (cached) return cached as DatasetTablesResult
+  }
+  let daxError: PbiError | null = null
   try {
-    const data = await pbiJson<{ value: PbiTable[] }>(
-      `/groups/${workspaceId}/datasets/${datasetId}/tables`,
-    )
-    if (Array.isArray(data.value)) return data.value
+    const data = await pbiJson<{ value: PbiTable[] }>('/groups/' + workspaceId + '/datasets/' + datasetId + '/tables')
+    if (Array.isArray(data.value)) {
+      const result = { tables: data.value, source: 'rest' as const, fetchedAt: fetchedAt() }
+      saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables: result.tables, fetchedAt: result.fetchedAt })
+      return result
+    }
   } catch (e) {
     if (!(e instanceof PbiError) || ![400, 404].includes(e.status)) throw e
   }
-
   try {
-    const data = await pbiJson<{
-      results?: { tables?: { rows?: Record<string, unknown>[] }[] }[]
-    }>(`/groups/${workspaceId}/datasets/${datasetId}/executeQueries`, {
-      method: 'POST',
-      body: JSON.stringify({
-        queries: [{ query: 'EVALUATE TOPN(500, INFO.VIEW.TABLES())' }],
-      }),
-    })
-    const rows = data.results?.[0]?.tables?.[0]?.rows ?? []
-    const tables = rows
-      .map((r) => ({
-        name: String(r['[Name]'] ?? ''),
-        isHidden: Boolean(r['[IsHidden]']),
-      }))
-      .filter((t) => t.name)
-    if (tables.length > 0) return tables
+    const tables = await executeDaxTableCatalog(workspaceId, datasetId)
+    if (tables.length > 0) {
+      const result = { tables, source: 'dax' as const, fetchedAt: fetchedAt() }
+      saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables, fetchedAt: result.fetchedAt })
+      return result
+    }
   } catch (e) {
-    if (!(e instanceof PbiError) || ![400, 401, 403, 404].includes(e.status)) throw e
+    if (!(e instanceof PbiError) || ![400, 401, 403, 404, 422, 504].includes(e.status)) throw e
+    daxError = e
   }
-
-  // 3) getInfo Schema 扫描（无需 Build 权限，但需要管理 API 可用；首次较慢 5-15 秒）
+  // 刷新弹窗只需要快速表清单。不要在 DAX 失败后继续等待耗时的
+  // Admin Scanner/XMLA 探测，否则前端会长时间停留在“正在加载”。
+  if (options.fast) {
+    throw daxError ?? new PbiError(404, '没有获取到数据集表清单')
+  }
   try {
     const schema = await getDatasetSchema(workspaceId, datasetId)
     if (schema.tables.length > 0) {
-      return schema.tables.map((t) => ({ name: t.name, isHidden: t.isHidden }))
+      const result = { tables: schema.tables.map((t) => ({ name: t.name, isHidden: t.isHidden })), source: 'schema' as const, fetchedAt: fetchedAt() }
+      saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables: result.tables, fetchedAt: result.fetchedAt })
+      return result
     }
-  } catch {
-    /* Schema 扫描不可用时走到底部的手动输入提示 */
+  } catch { /* continue to XMLA */ }
+  try {
+    const snapshot = await getTenantSnapshot(false)
+    const dataset = snapshot.datasets.find((item) => item.id === datasetId && item.workspaceId === workspaceId)
+    let datasetName = dataset?.name
+    if (!datasetName) {
+      const detail = await pbiJson<{ name?: string }>('/groups/' + workspaceId + '/datasets/' + datasetId)
+      datasetName = detail.name
+    }
+    if (!datasetName) throw new XmlaError('未找到数据集名称，无法构造 XMLA Catalog', 404)
+    const schema = await getDatasetSchemaViaXmla(workspaceId, datasetName)
+    const result = { tables: schema.tables.map((t) => ({ name: t.name, isHidden: t.isHidden })), source: 'dmv' as const, fetchedAt: fetchedAt() }
+    if (result.tables.length) saveDatasetTables({ environmentId: activeEnvId(), workspaceId, datasetId, source: result.source, tables: result.tables, fetchedAt: result.fetchedAt })
+    return result
+  } catch (e) {
+    throw new PbiError(e instanceof XmlaError ? e.status : 422, e instanceof Error ? e.message : String(e))
   }
-
-  throw new PbiError(
-    401,
-    '无法自动读取表清单（REST 表接口仅推送数据集可用；DAX 目录查询需要 Build 权限；Schema 扫描需要管理 API 权限）。请手动输入表名后回车，输入过的表名会自动缓存。',
-  )
 }
 
 export async function getRefreshables(): Promise<PbiRefreshable[]> {
@@ -462,14 +570,14 @@ export async function addServicePrincipalToWorkspace(
   workspaceId: string,
   clientId: string,
   role: 'Admin' | 'Member' | 'Contributor',
-): Promise<void> {
+): Promise<{ status: 'added' | 'unchanged' }> {
   if (getSnapshotMode() === 'member') {
     throw new PbiError(
       400,
       '成员模式下不可用：批量加入依赖管理 API。请让各工作区管理员在 Power BI 服务的「工作区访问权限」中手动添加该服务主体（输入客户端 ID），或使用管理员账号加入安全组。',
     )
   }
-  await pbiRequest(`/admin/groups/${workspaceId}/users`, {
+  const res = await pbiRequest(`/admin/groups/${workspaceId}/users`, {
     method: 'POST',
     body: JSON.stringify({
       identifier: clientId,
@@ -477,6 +585,8 @@ export async function addServicePrincipalToWorkspace(
       groupUserAccessRight: role,
     }),
   })
+  if (!res.ok && res.status !== 409) throw await toPbiError(res)
+  return { status: res.status === 409 ? 'unchanged' : 'added' }
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +625,7 @@ function parseSchemaFromScan(result: { workspaces?: ScanResultWorkspace[] }) {
       }))
       datasets.set(ds.id, {
         tables,
+        expressions: [],
         measureCount: tables.reduce((n, t) => n + (t.measures?.length ?? 0), 0),
         columnCount: tables.reduce((n, t) => n + (t.columns?.length ?? 0), 0),
       })
@@ -579,24 +690,23 @@ export async function getDatasetSchema(workspaceId: string, datasetId: string): 
 }
 
 // ---------------------------------------------------------------------------
-// 数据源视角：按数据源聚合全部数据集（并发扫描，缓存 10 分钟）
+// 数据源视角：按数据源聚合全部数据集，结果持久化到统一目录数据库。
 // ---------------------------------------------------------------------------
 
-const DS_INDEX_TTL_MS = 10 * 60 * 1000
-let dsIndexCache: { envId: string; at: number; data: DatasourceIndex } | null = null
-
 export async function getDatasourceIndex(force = false): Promise<DatasourceIndex> {
-  if (
-    !force &&
-    dsIndexCache &&
-    dsIndexCache.envId === activeEnvId() &&
-    Date.now() - dsIndexCache.at < DS_INDEX_TTL_MS
-  ) {
-    return dsIndexCache.data
+  const stored = loadCatalogState<DatasourceIndex>(activeEnvId(), 'datasource-index')
+  if (!force && stored) {
+    const catalog = getCatalogOverview(activeEnvId()).datasets as Array<Record<string, unknown>>
+    return {
+      ...stored.value,
+      models: catalog.map((r) => ({ workspaceId: String(r.workspace_id), workspaceName: String(r.workspace_name ?? ''), datasetId: String(r.dataset_id), datasetName: String(r.dataset_name ?? ''), tableCount: Number(r.table_count ?? 0), tableSource: r.table_source ? String(r.table_source) : undefined, updatedAt: String(r.updated_at) })),
+    }
   }
   const snap = await getTenantSnapshot(force)
+  saveDatasetCatalog(activeEnvId(), snap.datasets, snap.fetchedAt)
   const map = new Map<string, DatasourceIndexItem>()
   let scanned = 0
+  const errors: DatasourceIndex['errors'] = []
 
   const CONCURRENCY = 8
   for (let i = 0; i < snap.datasets.length; i += CONCURRENCY) {
@@ -605,10 +715,12 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
         let list: PbiDatasource[]
         try {
           list = await getDatasetDatasources(d.id, d.workspaceId)
-        } catch {
-          return // 个别数据集不可访问时跳过
+        } catch (error) {
+          errors.push({ datasetId: d.id, datasetName: d.name, workspaceName: d.workspaceName, message: error instanceof Error ? error.message : String(error) })
+          return
         }
         scanned++
+        saveDatasetDatasources(activeEnvId(), d.workspaceId, d.id, list, new Date().toISOString())
         for (const s of list) {
           const cd = s.connectionDetails ?? {}
           const primary = cd.server ?? cd.path ?? cd.url ?? s.name ?? '(未知)'
@@ -642,12 +754,17 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
   }
 
   const items = Array.from(map.values()).sort((a, b) => b.datasetCount - a.datasetCount)
+  const catalog = getCatalogOverview(activeEnvId()).datasets as Array<Record<string, unknown>>
   const data: DatasourceIndex = {
     fetchedAt: new Date().toISOString(),
+    attempted: snap.datasets.length,
     scanned,
+    failed: errors.length,
+    errors: errors.slice(0, 100),
+    models: catalog.map((r) => ({ workspaceId: String(r.workspace_id), workspaceName: String(r.workspace_name ?? ''), datasetId: String(r.dataset_id), datasetName: String(r.dataset_name ?? ''), tableCount: Number(r.table_count ?? 0), tableSource: r.table_source ? String(r.table_source) : undefined, updatedAt: String(r.updated_at) })),
     items,
   }
-  dsIndexCache = { envId: activeEnvId(), at: Date.now(), data }
+  saveCatalogState(activeEnvId(), 'datasource-index', data)
   return data
 }
 
@@ -727,3 +844,16 @@ export async function getRefreshFailures(force = false): Promise<RefreshFailureI
   failuresCache = { envId: activeEnvId(), at: Date.now(), data: failures }
   return failures
 }
+
+export async function getConnectionDiagnostics(force = false) {
+  const token = await getAccessTokenDiagnostics(force)
+  const endpoints = await Promise.all(['/groups?$top=1', '/admin/groups?$top=1'].map(async (path) => {
+    try { const response = await pbiRequest(path, { forceToken: force }); return { path, status: response.status, ok: response.ok, requestId: response.headers.get('requestId') ?? undefined } }
+    catch (e) { return { path, status: null, ok: false, detail: e instanceof Error ? e.message : String(e) } }
+  }))
+  return { token, endpoints }
+}
+
+export function invalidateSchemaCache() { schemaCache.clear() }
+export function invalidatePbiCaches() { snapshotCache = null; failuresCache = null; schemaCache.clear() }
+

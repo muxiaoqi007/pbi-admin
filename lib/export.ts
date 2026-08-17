@@ -8,7 +8,9 @@ export function exportCSV(
 ) {
   const esc = (v: string | number | boolean | undefined | null) => {
     const s = v === undefined || v === null ? '' : String(v)
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    // Prevent spreadsheet applications from interpreting exported text as a formula.
+    const safe = typeof v === 'string' && /^[\t\r ]*[=+\-@]/.test(s) ? `'${s}` : s
+    return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
   }
   const csv = '\uFEFF' + [headers, ...rows].map((r) => r.map(esc).join(',')).join('\r\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
@@ -17,5 +19,5 @@ export function exportCSV(
   a.href = url
   a.download = filename
   a.click()
-  URL.revokeObjectURL(url)
+  setTimeout(() => URL.revokeObjectURL(url), 0)
 }

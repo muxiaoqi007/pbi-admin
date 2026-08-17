@@ -28,8 +28,9 @@ export default function OverviewPage() {
   } = useSWR<TenantSnapshot>('/api/snapshot', fetcher, { keepPreviousData: true })
 
   const memberMode = snapshot?.mode === 'member'
+  const snapshotLoaded = Boolean(snapshot)
   const { data: failuresData, error: failuresError, isValidating: failuresValidating, mutate: mutateFailures } =
-    useSWR<{ failures: RefreshFailureItem[] }>('/api/refresh-failures', fetcher, {
+    useSWR<{ failures: RefreshFailureItem[] }>(snapshotLoaded ? '/api/refresh-failures' : null, fetcher, {
       revalidateOnFocus: false,
     })
   const failures = failuresData?.failures ?? []
@@ -46,7 +47,7 @@ export default function OverviewPage() {
   }
   const { data: refreshablesData, error: refreshablesError } = useSWR<{
     refreshables: PbiRefreshable[]
-  }>(memberMode ? null : '/api/refreshables', fetcher)
+  }>(snapshot && snapshot.mode !== 'member' ? '/api/refreshables' : null, fetcher)
 
   const memberCount = new Set(
     (snapshot?.workspaces ?? []).flatMap((w) => w.users.map((u) => u.identifier)),
@@ -61,7 +62,16 @@ export default function OverviewPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message={`成员模式：仅显示服务主体已加入的 ${snapshot.workspaces.length} 个工作区`}
-          description="当前云的管理 API 不支持服务主体身份（世纪互联即如此），已自动降级为成员模式。浏览、数据源、刷新记录、触发刷新均可正常使用；「报表级用户」与「全租户刷新状态」依赖管理 API，暂不可用。"
+          description={
+            <>
+              <p style={{ margin: '4px 0' }}>
+                {snapshot.adminFallbackReason ?? '租户级 Admin API 当前不可用，已自动降级为成员模式。'}
+              </p>
+              <p style={{ margin: '4px 0' }}>
+                浏览、数据源、刷新记录和触发刷新仍可使用；报表级用户与全租户刷新状态依赖租户级 Admin API。
+              </p>
+            </>
+          }
         />
       )}
       <div className="table-toolbar">

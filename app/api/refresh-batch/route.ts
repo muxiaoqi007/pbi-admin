@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
 import { triggerRefresh } from '@/lib/pbi'
+import { isPlainObject, isSafeId, isSafeText } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,10 +17,20 @@ interface BatchItem {
 /** 批量触发全部刷新：{items: [{workspaceId, datasetId, name?}]}，并发 3、单次上限 50 个 */
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { items?: BatchItem[] }
-    const items = (body.items ?? [])
-      .filter((i) => i.workspaceId && i.datasetId)
-      .map((i) => ({ ...i, name: i.name ?? i.datasetId }))
+    const raw = await req.json().catch(() => null)
+    const body = isPlainObject(raw) ? raw : null
+    const rawItems = body?.items
+    const items = (Array.isArray(rawItems) ? rawItems : [])
+      .filter(
+        (item): item is BatchItem =>
+          isPlainObject(item) && isSafeId(item.workspaceId) && isSafeId(item.datasetId),
+      )
+      .map((item) => ({
+        workspaceId: item.workspaceId,
+        datasetId: item.datasetId,
+        name: isSafeText(item.name, 300) && item.name.trim() ? item.name.trim() : item.datasetId,
+      }))
+      .filter((item, index, all) => all.findIndex((x) => x.workspaceId === item.workspaceId && x.datasetId === item.datasetId) === index)
       .slice(0, MAX_ITEMS)
     if (items.length === 0) {
       return NextResponse.json({ error: 'items 为空或格式不正确' }, { status: 400 })

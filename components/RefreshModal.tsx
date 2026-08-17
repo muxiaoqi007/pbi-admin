@@ -12,13 +12,14 @@ import {
   Modal,
   Radio,
   Select,
+  Space,
   Switch,
+  Tag,
 } from 'antd'
-import useSWR from 'swr'
 import type { Dayjs } from 'dayjs'
-import { fetcher, postJSON } from '@/lib/client'
-import { getCachedTables, setCachedTables } from '@/lib/table-cache'
-import type { DatasetView, PbiTable } from '@/lib/types'
+import { postJSON } from '@/lib/client'
+import { useDatasetTables } from '@/lib/use-dataset-tables'
+import type { DatasetView } from '@/lib/types'
 
 export interface RefreshFormValues {
   mode: 'all' | 'allEnhanced' | 'tables'
@@ -73,42 +74,19 @@ export default function RefreshModal({
     }
   }, [open, form])
 
-  const { data, error, isLoading } = useSWR<{ tables: PbiTable[] }>(
-    open && dataset ? `/api/datasets/tables?wid=${dataset.workspaceId}&did=${dataset.id}` : null,
-    fetcher,
+  const { tables, data, error, isLoading, addManualTables } = useDatasetTables(
+    dataset?.workspaceId,
+    dataset?.id,
+    open && Boolean(dataset),
   )
-
-  // API 拿到表清单时自动缓存；拿不到时用本地缓存（上次手动输入过的表名）
-  const apiTables = data?.tables ?? []
-  const [manualTables, setManualTables] = useState<string[]>([])
-  const datasetId = dataset?.id
-
-  useEffect(() => {
-    if (datasetId && apiTables.length > 0) {
-      setCachedTables(datasetId, apiTables.map((t) => t.name))
-    }
-    if (open && datasetId) {
-      setManualTables(getCachedTables(datasetId))
-    } else {
-      setManualTables([])
-    }
-  }, [apiTables, datasetId, open])
-
-  // 合并：API 表清单优先，补充本地缓存的表名
-  const allTableNames = Array.from(
-    new Set([...apiTables.map((t) => t.name), ...manualTables]),
-  )
-  const tables: PbiTable[] = allTableNames.map((name) => ({
-    name,
-    isHidden: apiTables.find((t) => t.name === name)?.isHidden ?? false,
-  }))
 
   async function submit() {
     if (!dataset) return
     const values = await form.validateFields()
-    // 选表模式下把用户选的表名缓存，下次打开自动带出
+    // Only persist names typed by the user; API/cache options retain their original provenance.
     if (values.mode === 'tables' && values.tables?.length) {
-      setCachedTables(dataset.id, values.tables)
+      const known = new Set(tables.map((table) => table.name))
+      addManualTables(values.tables.filter((name) => !known.has(name)))
     }
     setSubmitting(true)
     try {
@@ -181,6 +159,7 @@ export default function RefreshModal({
                 mode="tags"
                 style={{ width: '100%' }}
                 loading={isLoading}
+                notFoundContent={isLoading ? '正在读取表清单…' : '没有自动读取到表，可直接输入表名并按 Enter'}
                 tokenSeparators={[',', ' ']}
                 placeholder={tables.length > 0 ? '从下拉中选择，或输入表名' : '例如：Sales、DimCustomer'}
                 options={tables.map((t) => ({
@@ -189,6 +168,13 @@ export default function RefreshModal({
                 }))}
               />
             </Form.Item>
+            {tables.length > 0 && (
+              <Space wrap style={{ margin: '-8px 0 12px' }}>
+                {data?.tables.length ? <Tag color="green">API 实时：{data.tables.length}</Tag> : null}
+                {tables.some((table) => table.catalogSource === 'api-cache') ? <Tag color="blue">API 历史缓存</Tag> : null}
+                {tables.some((table) => table.catalogSource === 'manual' || table.catalogSource === 'legacy') ? <Tag>手工/旧缓存</Tag> : null}
+              </Space>
+            )}
             {error && (
               <Alert
                 type="warning"
@@ -199,7 +185,7 @@ export default function RefreshModal({
                   <>
                     <p style={{ margin: '4px 0' }}>{String(error.message ?? error)}</p>
                     <p style={{ margin: '4px 0' }} className="text-muted">
-                      可直接在上方输入框手动输入表名后回车，输入过的表名会自动缓存，下次打开时自动带出。
+                      实时接口失败不代表下拉框为空：上方仍可能显示 API 历史缓存或手工录入项，并已明确标注来源。可继续手工输入表名。
                     </p>
                   </>
                 }

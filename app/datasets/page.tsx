@@ -206,8 +206,8 @@ export default function DatasetsPage() {
           title={`批量刷新结果：成功 ${batchResult.success} / ${batchResult.total}`}
         >
           <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {batchResult.failures.map((f) => (
-              <li key={f.name} style={{ marginBottom: 4 }}>
+            {batchResult.failures.map((f, index) => (
+              <li key={`${f.name}-${index}`} style={{ marginBottom: 4 }}>
                 <Typography.Text strong>{f.name}</Typography.Text>
                 <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>
                   {f.error}

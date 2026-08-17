@@ -13,6 +13,8 @@ export interface RuntimeConfig {
   authority: string
   apiBase: string
   resource: string
+  /** Optional XMLA transport endpoint override (server-side only). */
+  xmlaEndpointOverride?: string
 }
 
 export interface PbiWorkspaceUser {
@@ -132,8 +134,12 @@ export interface DatasourceIndexItem {
 
 export interface DatasourceIndex {
   fetchedAt: string
+  attempted: number
   /** 成功扫描的数据集数（失败的不计入） */
   scanned: number
+  failed: number
+  errors: { datasetId: string; datasetName: string; workspaceName: string; message: string }[]
+  models: { workspaceId: string; workspaceName: string; datasetId: string; datasetName: string; tableCount: number; tableSource?: string; updatedAt: string }[]
   items: DatasourceIndexItem[]
 }
 
@@ -212,15 +218,41 @@ export interface SchemaMeasure {
   description?: string
 }
 
+export interface SchemaPartition {
+  name?: string
+  /** Power Query/M expression returned by the scanner for this partition. */
+  expression?: string
+}
+
 export interface SchemaTable {
   name: string
   isHidden?: boolean
+  description?: string
   columns?: SchemaColumn[]
   measures?: SchemaMeasure[]
+  /** Power Query/M source expression for this model table, when metadata scanning returns it. */
+  sourceExpression?: string
+  /** A table may contain multiple partitions, each with its own M expression. */
+  partitions?: SchemaPartition[]
+}
+
+export interface DatasetExpression {
+  name: string
+  expression?: string
+  description?: string
 }
 
 export interface DatasetSchema {
   tables: SchemaTable[]
+  expressions: DatasetExpression[]
+  /** Storage mode reported by Admin Scanner, e.g. Import/DirectQuery/Composite. */
+  storageMode?: string
+  /** Dataset-level scanner metadata used to explain model-specific differences. */
+  configuredBy?: string
+  isRefreshable?: boolean
+  /** True when the scanner returned a stale-schema indicator. */
+  schemaMayNotBeUpToDate?: boolean
+  schemaRetrievalError?: string
   /** 度量值总数 */
   measureCount: number
   /** 列总数 */
@@ -253,6 +285,10 @@ export interface DatasetView extends PbiDataset {
 export interface TenantSnapshot {
   /** admin = 管理模式（全租户，管理 API）；member = 成员模式（服务主体可见的工作区） */
   mode: 'admin' | 'member'
+  /** 管理 API 不可用时的原因；成员模式仍可正常返回工作区数据 */
+  adminFallbackReason?: string
+  /** 当前调用服务主体的 Entra 对象 ID，用于和工作区用户 identifier 对应。 */
+  activePrincipalObjectId?: string
   fetchedAt: string
   workspaces: WorkspaceView[]
   reports: ReportView[]

@@ -44,12 +44,32 @@ interface ConfigResponse {
 
 interface TestResult {
   ok: boolean
-  tokenPreview: string
+  tokenAcquired: boolean
   mode?: 'admin' | 'member'
+  adminFallbackReason?: string
   workspaceCount: number
   reportCount: number
   datasetCount: number
   fetchedAt: string
+  diagnostics?: {
+    token: {
+      authType: string
+      tokenVersion?: string
+      audience?: string
+      tenantId?: string
+      clientId?: string
+      roles: string[]
+      scopes: string[]
+    }
+    endpoints: Array<{
+      path: string
+      status: number | null
+      ok: boolean
+      requestId?: string
+      errorCode?: string
+      detail?: string
+    }>
+  }
 }
 
 interface FormValues {
@@ -341,19 +361,58 @@ export default function SettingsPage() {
 
         {testResult && (
           <Alert
-            type="success"
+            type={testResult.mode === 'member' ? 'warning' : 'success'}
             showIcon
             style={{ marginTop: 16 }}
-            message="连接成功"
+            message={testResult.mode === 'member' ? '基础连接成功，但未启用租户 Admin API' : '连接成功'}
             description={
-              <Descriptions column={2} size="small">
-                <Descriptions.Item label="Token">{testResult.tokenPreview}</Descriptions.Item>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Token">
+                  {testResult.tokenAcquired ? '已获取（不会显示令牌内容）' : '未获取'}
+                </Descriptions.Item>
                 <Descriptions.Item label="数据模式">
                   {testResult.mode === 'member' ? '成员模式（服务主体已加入的工作区）' : '管理模式（全租户）'}
                 </Descriptions.Item>
+                {testResult.mode === 'member' && testResult.adminFallbackReason && (
+                  <Descriptions.Item label="降级原因">
+                    {testResult.adminFallbackReason}
+                  </Descriptions.Item>
+                )}
                 <Descriptions.Item label="工作区数">{testResult.workspaceCount}</Descriptions.Item>
                 <Descriptions.Item label="报表数">{testResult.reportCount}</Descriptions.Item>
                 <Descriptions.Item label="数据集数">{testResult.datasetCount}</Descriptions.Item>
+                {testResult.diagnostics && (
+                  <Descriptions.Item label="API 诊断">
+                    <Space direction="vertical" size={4}>
+                      <span>
+                        Token：
+                        {testResult.diagnostics.token.authType === 'service_principal'
+                          ? '服务主体（client credentials）'
+                          : testResult.diagnostics.token.authType}
+                      </span>
+                      {testResult.diagnostics.endpoints.map((endpoint) => (
+                        <span key={endpoint.path}>
+                          {endpoint.path.startsWith('/admin/') ? '租户 Admin API' : '普通工作区 API'}
+                          ：HTTP {endpoint.status ?? '无法请求'}{' '}
+                          {endpoint.ok ? '通过' : endpoint.errorCode || endpoint.detail || '失败'}
+                          {endpoint.requestId ? `（RequestId: ${endpoint.requestId}）` : ''}
+                        </span>
+                      ))}
+                      {testResult.diagnostics.token.authType === 'service_principal' &&
+                        testResult.diagnostics.endpoints.some(
+                          (endpoint) => endpoint.path.startsWith('/admin/') && endpoint.status === 401,
+                        ) &&
+                        testResult.diagnostics.token.roles.length > 0 && (
+                          <Typography.Text type="warning">
+                            当前服务主体令牌包含 Power BI 应用角色：
+                            {testResult.diagnostics.token.roles.join(', ')}。服务主体调用只读 Admin API
+                            时，Microsoft 要求不要在应用注册中配置需要管理员同意的 Power BI
+                            权限，而应由 Fabric 管理门户的 Admin API 租户设置和安全组控制。
+                          </Typography.Text>
+                        )}
+                    </Space>
+                  </Descriptions.Item>
+                )}
               </Descriptions>
             }
           />

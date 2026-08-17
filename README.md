@@ -25,13 +25,13 @@
 
 | | 管理模式 | 成员模式 |
 | --- | --- | --- |
-| 触发条件 | 管理 API 可用（国际版租户开启租户设置后） | 管理 API 返回 401/403（**世纪互联对服务主体一律如此**，与其租户设置无关） |
+| 触发条件 | 管理 API 可用（取决于当前云、应用程序权限和租户设置） | 管理 API 返回 401/403/404；普通工作区 API 仍可用时自动降级 |
 | 数据范围 | 租户内全部工作区 | 服务主体已加入的工作区 |
 | 工作区/成员/报表/数据集/数据源/刷新记录/触发刷新 | ✓ | ✓ |
 | 报表级单独授权用户 | ✓ | ✗（世纪互联无此接口，页面会明确提示，可用工作区成员替代） |
 | 全租户刷新状态总览、批量加入工作区 | ✓ | ✗（运维工具页会显示手动添加指引） |
 
-当前模式显示在：设置页测试连接结果、总览页顶部横幅。
+当前模式和降级原因显示在：设置页测试连接结果、总览页顶部横幅。
 
 ## 快速开始
 
@@ -78,13 +78,9 @@ docker run -d -p 3000:3000 \
 
 2. **创建客户端密钥**：应用 → 证书和密码 → 新客户端密码，复制「值」（只显示一次）。
 
-3. **添加 API 权限**（应用程序权限，非委托权限）：应用 → API 权限 → 添加权限 → **Power BI Service**（搜索不到时在「我的组织使用的 API」中搜索 Power BI）→ **Application permissions**，勾选：
-   - `Workspace.ReadWrite.All`（工作区与成员管理）
-   - `WorkspaceInfo.ReadWrite.All`（工作区 Schema 扫描：表/列/度量值结构，选表刷新的表清单来源之一）
-   - `Report.Read.All`（报表与报表用户）
-   - `Dataset.ReadWrite.All`（数据集、数据源、刷新记录、触发刷新）
+3. **不要给服务主体添加 Power BI 的委托权限或需要管理员同意的应用程序权限**。本工具使用 `client_credentials`，Power BI Admin API 的授权由 Fabric/Power BI 管理门户的租户设置和安全组控制；错误地给应用注册添加 `Tenant.Read.All`、`Tenant.ReadWrite.All` 等角色，可能导致令牌带有 Power BI 应用角色而被 Admin API 返回 401。
 
-   然后点「代表 [租户] 授予管理员同意」。
+   普通工作区 API 的访问范围仍由服务主体是否加入工作区决定。需要扫描全租户时，继续完成下一步的 Admin API 租户设置。
 
 4. **Power BI 租户设置**（关键，缺了这步管理 API 全部 401/403）：
    1. 在 Entra 门户建一个**安全组**，把应用的服务主体加为组成员（Entra ID → 组 → 新建组「安全」类型 → 成员添加时切换到「服务主体」选择你的应用）。
@@ -98,14 +94,14 @@ docker run -d -p 3000:3000 \
 | | 国际版 | 世纪互联 |
 | --- | --- | --- |
 | 认证 Authority | `https://login.microsoftonline.com` | `https://login.chinacloudapi.cn` |
-| 认证端点 | `/{tenant}/oauth2/token`（v1 流，`resource` 参数） | 同左 |
+| 认证端点 | `/{tenant}/oauth2/v2.0/token`（`scope=<resource>/.default`） | 同左 |
 | Token Resource | `https://analysis.windows.net/powerbi/api` | `https://analysis.chinacloudapi.cn/powerbi/api` |
 | API 基地址 | `https://api.powerbi.com/v1.0/myorg` | `https://api.powerbi.cn/v1.0/myorg` |
 
 实现说明：
 
-- 认证走 v1 端点（`/oauth2/token` + `resource`），两个云均验证可用。
-- 管理 API 统一使用 `/admin/groups` 老路由。世纪互联的 API 面落后于国际版，较新的 `/admin/workspaces` 别名在世纪互联返回 404（"No HTTP resource was found"），`/admin/groups` 在两个云都可用。
+- 认证走 OAuth 2.0 client credentials（当前实现使用 `/oauth2/v2.0/token` + `scope=<resource>/.default`）。
+- 管理 API 统一优先使用 /admin/groups 老路由；不同云环境的路由和权限以实际响应为准。若管理 API 返回 401/403/404 且普通 /groups 可用，工具会保留工作区数据并自动进入成员模式。
 - 世纪互联若登录端点调整（如迁移到 `login.partner.microsoftonline.cn`），在「设置 → 高级设置」中覆盖 Authority 即可，无需改代码。
 
 ## 选表刷新（增强刷新）说明
@@ -119,12 +115,11 @@ docker run -d -p 3000:3000 \
 | 现象 | 原因与处理 |
 | --- | --- |
 | 404 "No HTTP resource was found .../admin/workspaces" | 世纪互联不支持该新路由，本工具已统一改用 `/admin/groups`（两云通用） |
-| 401 Unauthorized（空响应体，调用 /admin/* 时） | **租户设置未开启「允许服务主体使用 Power BI API」**，或服务主体不在允许的安全组中；见下方「开通管理 API 权限」 |
-| 403 | 应用注册的 Power BI API 应用程序权限未添加或未授予管理员同意 |
+| 401/403（调用 `/admin/*`） | 服务主体令牌或租户 Admin API 设置不匹配。先确认使用的是同一客户端凭据、同一 `/admin/...` URL；再检查管理门户中的「允许服务主体使用 Fabric/Power BI API」及安全组范围。不要仅凭普通 `/groups` 返回 200 判断租户 Admin API 已授权。 |
 | 获取令牌失败 AADSTS90002（租户未找到） | 云环境选错了（国际版/世纪互联不匹配），或租户 ID 填错 |
 | 获取令牌失败 invalid_client | 客户端密钥错误或已过期，重新创建密钥 |
 | 403（触发刷新/表清单） | 服务主体未加入目标工作区 → 「运维工具」页批量加入 |
 
 ## 技术栈
 
-Next.js 14（App Router）+ TypeScript + Ant Design 5 + SWR。所有 Power BI 调用由服务端 API Route 代理，客户端密钥只存在于服务端（`data/config.json` 或 `.env.local`，均已 gitignore）。
+Next.js 15（App Router）+ TypeScript + Ant Design 5 + SWR。所有 Power BI 调用由服务端 API Route 代理，客户端密钥只存在于服务端（`data/config.json` 或 `.env.local`，均已 gitignore）。

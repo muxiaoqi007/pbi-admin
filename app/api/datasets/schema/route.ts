@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
 import { getDatasetSchema } from '@/lib/pbi'
+import { isSafeId } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,7 +11,7 @@ export async function GET(req: NextRequest) {
   try {
     const wid = req.nextUrl.searchParams.get('wid')
     const did = req.nextUrl.searchParams.get('did')
-    if (!wid || !did) {
+    if (!isSafeId(wid) || !isSafeId(did)) {
       return NextResponse.json({ error: '缺少 wid 或 did 参数' }, { status: 400 })
     }
     const schema = await getDatasetSchema(wid, did)
