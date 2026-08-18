@@ -9,9 +9,75 @@ body {
   height: 100%;
 }
 
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 60px;
+  padding-inline: 18px;
+  background: #07111f;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.app-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  color: #07111f;
+  background: #e8ad03;
+  font-weight: 800;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+}
+
+.app-brand-title {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: 0.1px;
+}
+
+.app-sider.ant-layout-sider {
+  background: #0b1626;
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.app-sider .ant-menu-dark,
+.app-sider .ant-menu-dark > .ant-menu {
+  background: transparent;
+}
+
+.app-sider .ant-menu-dark .ant-menu-item-selected {
+  background: rgba(232, 173, 3, 0.16);
+}
+
+.app-sider .ant-menu-dark .ant-menu-item-selected::after {
+  border-inline-end-color: #e8ad03;
+}
+
+.header-env-select .ant-select-selector {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.header-env-select .ant-select-selection-item,
+.header-env-select .ant-select-arrow {
+  color: rgba(255, 255, 255, 0.88) !important;
+}
+
 .page-content {
   padding: 24px;
-  min-height: calc(100vh - 64px);
+  min-height: calc(100vh - 60px);
   background: #f5f7fa;
 }
 
@@ -127,13 +193,40 @@ body {
 }
 
 .settings-env-list {
-  width: 320px;
-  flex: 0 0 320px;
+  width: 360px;
+  flex: 0 0 360px;
+  border-radius: 12px;
 }
 
 .settings-editor {
   flex: 1;
-  min-width: 480px;
+  min-width: 500px;
+}
+
+.settings-editor > .ant-card {
+  border-radius: 12px;
+}
+
+.settings-env-item {
+  cursor: pointer;
+  margin-bottom: 6px;
+  padding: 12px 10px !important;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-env-item:hover {
+  background: #fafafa;
+}
+
+.settings-env-item-active {
+  background: #fffbe6;
+  border-color: #ffe58f;
+}
+
+.settings-env-item-active:hover {
+  background: #fffbe6;
 }
 
 @media (max-width: 900px) {
@@ -169,5 +262,19 @@ body {
     width: 100%;
     min-width: 0;
     flex-basis: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    padding-inline: 12px;
+  }
+
+  .app-brand-title {
+    display: none;
+  }
+
+  .header-env-select {
+    width: 170px !important;
   }
 }

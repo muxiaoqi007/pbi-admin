@@ -14,16 +14,46 @@ import { invalidatePbiCaches } from '@/lib/pbi'
 
 export const dynamic = 'force-dynamic'
 
-/** GET：返回脱敏后的环境列表与当前激活环境。 */
+const ENV_VAR_ID = 'env-from-env'
+
+function maskForClient(env: Environment) {
+  return {
+    ...maskEnvironment(env),
+    source: env.id === ENV_VAR_ID ? ('environmentVariables' as const) : ('managed' as const),
+    readOnly: env.id === ENV_VAR_ID,
+  }
+}
+
+function securityStatus() {
+  const production = process.env.NODE_ENV === 'production'
+  const encryptionConfigured = Boolean(process.env.PBI_CONFIG_ENCRYPTION_KEY)
+  return {
+    production,
+    encryptionConfigured,
+    credentialPersistence: encryptionConfigured
+      ? ('encrypted' as const)
+      : production
+        ? ('blocked' as const)
+        : ('developmentPlaintext' as const),
+  }
+}
+
+function configPayload(ok?: boolean) {
+  const { environments, activeEnvId } = listEnvironments()
+  const active = environments.find((e) => e.id === activeEnvId)
+  return {
+    ...(ok === undefined ? {} : { ok }),
+    activeEnvId,
+    environments: environments.map(maskForClient),
+    activeEnv: active ? maskForClient(active) : null,
+    security: securityStatus(),
+  }
+}
+
+/** GET：返回脱敏后的环境列表、当前激活环境与安全状态。 */
 export async function GET() {
   try {
-    const { environments, activeEnvId } = listEnvironments()
-    const active = environments.find((e) => e.id === activeEnvId)
-    return NextResponse.json({
-      activeEnvId,
-      environments: environments.map(maskEnvironment),
-      activeEnv: active ? maskEnvironment(active) : null,
-    })
+    return NextResponse.json(configPayload())
   } catch (e) {
     return fail(e)
   }
@@ -49,6 +79,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: '环境配置格式无效' }, { status: 400 })
       }
       const env = body.env
+      if (env.id === ENV_VAR_ID) {
+        return NextResponse.json(
+          { error: '该环境由服务器环境变量托管，不能从页面修改。请修改部署配置后重启服务。' },
+          { status: 409 },
+        )
+      }
       if (env.id !== undefined && !isSafeId(env.id)) {
         return NextResponse.json({ error: '环境 ID 格式无效' }, { status: 400 })
       }
@@ -69,6 +105,12 @@ export async function POST(req: NextRequest) {
 
     if ((body.action === 'activate' || body.action === 'delete') && !isSafeId(body.id)) {
       return NextResponse.json({ error: '环境 ID 格式无效' }, { status: 400 })
+    }
+    if ((body.action === 'activate' || body.action === 'delete') && body.id === ENV_VAR_ID) {
+      return NextResponse.json(
+        { error: '该环境由服务器环境变量托管，不能从页面切换或删除。' },
+        { status: 409 },
+      )
     }
 
     switch (body.action) {
@@ -97,14 +139,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: '未知操作' }, { status: 400 })
     }
 
-    const { environments, activeEnvId } = listEnvironments()
-    const active = environments.find((e) => e.id === activeEnvId)
-    return NextResponse.json({
-      ok: true,
-      activeEnvId,
-      environments: environments.map(maskEnvironment),
-      activeEnv: active ? maskEnvironment(active) : null,
-    })
+    return NextResponse.json(configPayload(true))
   } catch (e) {
     return fail(e)
   }
