@@ -7,7 +7,9 @@ import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
+import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
+import TableEmpty from '@/components/TableEmpty'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -49,10 +51,7 @@ export default function ReportsPage() {
 
   const { data: pagesData, error: pagesError, isLoading: pagesLoading } = useSWR<{
     pages: PbiReportPage[]
-  }>(
-    pagesReport ? `/api/reports/pages?wid=${pagesReport.workspaceId}&rid=${pagesReport.id}` : null,
-    fetcher,
-  )
+  }>(pagesReport ? `/api/reports/pages?wid=${pagesReport.workspaceId}&rid=${pagesReport.id}` : null, fetcher)
 
   const datasourceDataset = useMemo(
     () => data?.datasets.find((d) => d.id === datasourceReport?.datasetId),
@@ -75,35 +74,62 @@ export default function ReportsPage() {
 
   return (
     <div>
+      <PageHeader
+        title="报表"
+        description="统一查看租户内报表、所属工作区、绑定数据集与页面结构，并快速跳转到 Power BI 打开。"
+        meta={data ? `数据快照：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}` : undefined}
+        actions={
+          <>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={isValidating}
+              onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+            >
+              刷新
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+              导出 CSV
+            </Button>
+          </>
+        }
+      />
+
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
-      <div className="table-toolbar">
+
+      <div className="filter-bar">
         <Input
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索报表名称 / 工作区 / 数据集"
-          style={{ width: 320 }}
+          style={{ width: 360, maxWidth: '100%' }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
-        <span className="text-muted">共 {filtered.length} 张报表</span>
-        <Button
-          icon={<ReloadOutlined />}
-          loading={isValidating}
-          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
-        >
-          刷新列表
-        </Button>
-        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
-          导出 CSV
-        </Button>
+        <span className="filter-summary">
+          {keyword ? `筛选后 ${filtered.length} / ${data?.reports.length ?? 0} 张报表` : `共 ${filtered.length} 张报表`}
+        </span>
       </div>
+
       <Table<ReportView>
         rowKey={(r) => `${r.workspaceId}:${r.id}`}
         loading={isLoading}
         dataSource={filtered}
         scroll={{ x: 1000 }}
-        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 张`, onShowSizeChange: (_, size) => setPageSize(size) }}
+        locale={{
+          emptyText: (
+            <TableEmpty
+              title={keyword ? '没有匹配的报表' : '暂无报表'}
+              description={keyword ? '尝试搜索其他报表、工作区或数据集名称。' : '当前环境没有可显示的报表。'}
+            />
+          ),
+        }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 张`,
+          onShowSizeChange: (_, size) => setPageSize(size),
+        }}
         columns={[
           { title: '报表', dataIndex: 'name', ellipsis: true },
           { title: '工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },
@@ -112,13 +138,13 @@ export default function ReportsPage() {
             dataIndex: 'datasetId',
             width: 180,
             ellipsis: true,
-            render: (v?: string) => (v ? datasetNameById.get(v) ?? v : <span className="text-muted">无</span>),
+            render: (v?: string) => (v ? datasetNameById.get(v) ?? v : <span className="text-muted">未绑定</span>),
           },
           {
             title: '修改时间',
             dataIndex: 'modifiedDateTime',
             width: 160,
-            render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
+            render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : <span className="text-muted">未知</span>),
           },
           {
             title: '操作',
@@ -133,12 +159,12 @@ export default function ReportsPage() {
                 ) : (
                   <Typography.Text type="secondary">数据源</Typography.Text>
                 )}
-                {r.webUrl && (
+                {r.webUrl ? (
                   <Typography.Link href={r.webUrl} target="_blank">
-                    <Space size={2}>
-                      打开 <ExportOutlined />
-                    </Space>
+                    <Space size={2}>打开 <ExportOutlined /></Space>
                   </Typography.Link>
+                ) : (
+                  <Typography.Text type="secondary">打开</Typography.Text>
                 )}
               </Space>
             ),
@@ -178,14 +204,10 @@ export default function ReportsPage() {
           loading={pagesLoading}
           dataSource={pagesData?.pages ?? []}
           pagination={false}
+          locale={{ emptyText: <TableEmpty title="暂无页面信息" description="当前报表没有返回可显示的页面。" /> }}
           columns={[
             { title: '序号', dataIndex: 'order', width: 60, render: (v?: number) => v ?? '-' },
-            {
-              title: '页面名称',
-              dataIndex: 'displayName',
-              ellipsis: true,
-              render: (v?: string) => v ?? '-',
-            },
+            { title: '页面名称', dataIndex: 'displayName', ellipsis: true, render: (v?: string) => v ?? '-' },
           ]}
         />
       </Modal>
