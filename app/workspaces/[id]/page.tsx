@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Button, Card, Descriptions, Dropdown, Drawer, Space, Table, Tabs, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, MoreOutlined } from '@ant-design/icons'
+import { Button, Card, Descriptions, Dropdown, Drawer, Space, Table, Tabs, Tag, Tooltip, Typography } from 'antd'
+import { ArrowLeftOutlined, MoreOutlined, ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
@@ -11,6 +11,7 @@ import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
 import SchemaDrawer from '@/components/SchemaDrawer'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import type { DatasetView, PbiAdminUser, TenantSnapshot } from '@/lib/types'
@@ -28,7 +29,7 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
     params.then(({ id }) => setWorkspaceId(id))
   }, [params])
 
-  const { data, error, isLoading, mutate } = useSWR<TenantSnapshot>(
+  const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
     fetcher,
     { keepPreviousData: true },
@@ -69,17 +70,25 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
 
   return (
     <div>
-      <Space style={{ marginBottom: 12 }}>
+      {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
+      <Space style={{ marginBottom: 12 }} wrap>
         <Button icon={<ArrowLeftOutlined />} onClick={() => router.push('/workspaces')}>
           返回
         </Button>
         <Typography.Title level={4} style={{ margin: 0 }}>
           {workspace?.name ?? (isLoading ? '加载中…' : workspaceId)}
         </Typography.Title>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+        >
+          刷新
+        </Button>
       </Space>
 
       <Card style={{ marginBottom: 16 }}>
-        <Descriptions column={3} size="small">
+        <Descriptions column={{ xs: 1, sm: 2, lg: 3 }} size="small">
           <Descriptions.Item label="工作区 ID">
             <Typography.Text copyable style={{ fontSize: 12 }}>{workspaceId}</Typography.Text>
           </Descriptions.Item>
@@ -107,7 +116,8 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
                 size="small"
                 loading={isLoading}
                 dataSource={reports}
-                pagination={{ pageSize: 20 }}
+                scroll={{ x: 720 }}
+                pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 张` }}
                 columns={[
                   { title: '名称', dataIndex: 'name', ellipsis: true },
                   { title: '类型', dataIndex: 'reportType', width: 140 },
@@ -120,11 +130,14 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
                   {
                     title: '操作',
                     width: 90,
-                    render: (_: unknown, r) => (
-                      <Typography.Link href={r.webUrl} target="_blank">
-                        打开
-                      </Typography.Link>
-                    ),
+                    render: (_: unknown, r) =>
+                      r.webUrl ? (
+                        <Typography.Link href={r.webUrl} target="_blank">
+                          打开
+                        </Typography.Link>
+                      ) : (
+                        '-'
+                      ),
                   },
                 ]}
               />
@@ -139,7 +152,8 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
                 size="small"
                 loading={isLoading}
                 dataSource={datasets}
-                pagination={{ pageSize: 20 }}
+                scroll={{ x: 780 }}
+                pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个` }}
                 columns={[
                   { title: '名称', dataIndex: 'name', ellipsis: true },
                   {
@@ -157,10 +171,21 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
                   { title: '关联报表', dataIndex: 'reportCount', width: 90 },
                   {
                     title: '操作',
-                    width: 170,
+                    width: 190,
+                    fixed: 'right',
                     render: (_: unknown, d: DatasetView) => (
                       <Space size={4}>
-                        <a onClick={() => setRefreshDataset(d)}>立即刷新</a>
+                        <Tooltip title={d.isRefreshable ? undefined : '该数据集当前不可刷新'}>
+                          <Button
+                            type="link"
+                            size="small"
+                            disabled={!d.isRefreshable}
+                            onClick={() => setRefreshDataset(d)}
+                            style={{ paddingInline: 0 }}
+                          >
+                            立即刷新
+                          </Button>
+                        </Tooltip>
                         <Dropdown
                           trigger={['click']}
                           menu={{
@@ -195,7 +220,9 @@ export default function WorkspaceDetailPage({ params }: { params: Promise<{ id: 
         open={!!refreshDataset}
         dataset={refreshDataset}
         onClose={() => setRefreshDataset(null)}
-        onTriggered={() => setHistoryDataset(refreshDataset)}
+        onTriggered={() => {
+          if (refreshDataset) setHistoryDataset(refreshDataset)
+        }}
       />
       <Drawer
         open={!!usersDataset}
