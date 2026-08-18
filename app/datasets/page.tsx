@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { Alert, App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { DownloadOutlined, ExportOutlined, MoreOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ExportOutlined, MoreOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
@@ -10,6 +10,7 @@ import ErrorAlert from '@/components/ErrorAlert'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
 import SchemaDrawer from '@/components/SchemaDrawer'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import UsersTable from '@/components/UsersTable'
 import { fetcher, postJSON } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -128,16 +129,7 @@ export default function DatasetsPage() {
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
-      {error && data && (
-        <Alert
-          type="warning"
-          showIcon
-          message="最新数据刷新失败，当前仍显示上一次成功加载的数据"
-          description={error instanceof Error ? error.message : String(error)}
-          action={<Button size="small" onClick={() => mutate()}>重试</Button>}
-          style={{ marginBottom: 12 }}
-        />
-      )}
+      {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
       <div className="table-toolbar">
         <Input
           allowClear
@@ -148,10 +140,16 @@ export default function DatasetsPage() {
           onChange={(e) => setKeyword(e.target.value)}
         />
         <span className="text-muted">共 {filtered.length} 个数据集</span>
-        {isValidating && data && <span className="text-muted">（正在刷新…）</span>}
         {selectedDatasets.length > 0 && selectedVisibleCount !== selectedDatasets.length && (
           <Tag color="blue">已选 {selectedDatasets.length} 个，其中当前筛选可见 {selectedVisibleCount} 个</Tag>
         )}
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+        >
+          刷新列表
+        </Button>
         <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
           导出 CSV
         </Button>
