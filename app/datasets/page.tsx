@@ -7,10 +7,12 @@ import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
+import PageHeader from '@/components/PageHeader'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
 import SchemaDrawer from '@/components/SchemaDrawer'
 import StaleDataAlert from '@/components/StaleDataAlert'
+import TableEmpty from '@/components/TableEmpty'
 import UsersTable from '@/components/UsersTable'
 import { fetcher, postJSON } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -60,12 +62,14 @@ export default function DatasetsPage() {
     return filtered.filter((d) => ids.has(d.id)).length
   }, [filtered, selectedDatasets])
 
+  const refreshableCount = useMemo(
+    () => (data?.datasets ?? []).filter((d) => d.isRefreshable).length,
+    [data],
+  )
+
   const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
     users: PbiAdminUser[]
-  }>(
-    usersDataset ? `/api/datasets/users?wid=${usersDataset.workspaceId}&did=${usersDataset.id}` : null,
-    fetcher,
-  )
+  }>(usersDataset ? `/api/datasets/users?wid=${usersDataset.workspaceId}&did=${usersDataset.id}` : null, fetcher)
 
   const boundReports = useMemo(
     () => (data?.reports ?? []).filter((r) => r.datasetId === reportsDataset?.id),
@@ -118,8 +122,8 @@ export default function DatasetsPage() {
     modal.confirm({
       title: `批量刷新 ${count} 个数据集？`,
       content:
-        '将依次对所选数据集触发全部刷新（并发 3 个，避免触发限流）。已有刷新排队中的数据集会被服务端拒绝，失败明细将在完成后展示。',
-      okText: '开始刷新',
+        '将依次提交全部刷新请求（服务端并发 3 个，避免触发限流）。已有刷新排队中的数据集可能被 Power BI 拒绝。',
+      okText: '开始提交',
       cancelText: '取消',
       okButtonProps: { loading: batchRunning },
       onOk: runBatchRefresh,
@@ -128,73 +132,131 @@ export default function DatasetsPage() {
 
   return (
     <div>
+      <PageHeader
+        title="数据集"
+        description="管理语义模型刷新、结构、数据源、用户与关联报表。批量操作仅对当前可刷新的数据集生效。"
+        meta={
+          data
+            ? `数据快照：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')} · 可刷新 ${refreshableCount} / ${data.datasets.length}`
+            : undefined
+        }
+        actions={
+          <>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={isValidating}
+              onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+            >
+              刷新
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+              导出 CSV
+            </Button>
+          </>
+        }
+      />
+
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
-      <div className="table-toolbar">
+
+      <div className="filter-bar">
         <Input
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索数据集名称 / 工作区"
-          style={{ width: 320 }}
+          style={{ width: 340, maxWidth: '100%' }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
-        <span className="text-muted">共 {filtered.length} 个数据集</span>
-        {selectedDatasets.length > 0 && selectedVisibleCount !== selectedDatasets.length && (
-          <Tag color="blue">已选 {selectedDatasets.length} 个，其中当前筛选可见 {selectedVisibleCount} 个</Tag>
-        )}
-        <Button
-          icon={<ReloadOutlined />}
-          loading={isValidating}
-          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
-        >
-          刷新列表
-        </Button>
-        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
-          导出 CSV
-        </Button>
-        <Button
-          type="primary"
-          ghost
-          icon={<SyncOutlined />}
-          disabled={selectedDatasets.length === 0}
-          loading={batchRunning}
-          onClick={confirmBatch}
-        >
-          批量刷新{selectedDatasets.length > 0 ? `（已选 ${selectedDatasets.length} 个）` : ''}
-        </Button>
-        {selectedDatasets.length > 0 && (
-          <Button size="small" type="link" onClick={() => setSelected([])} disabled={batchRunning}>
-            清空选择
-          </Button>
-        )}
+        <span className="filter-summary">
+          {keyword ? `筛选后 ${filtered.length} / ${data?.datasets.length ?? 0} 个数据集` : `共 ${filtered.length} 个数据集`}
+        </span>
       </div>
+
+      {selectedDatasets.length > 0 && (
+        <div className="selection-bar">
+          <div>
+            <Typography.Text strong>已选择 {selectedDatasets.length} 个可刷新数据集</Typography.Text>
+            {selectedVisibleCount !== selectedDatasets.length && (
+              <span className="text-muted"> · 当前筛选可见 {selectedVisibleCount} 个</span>
+            )}
+          </div>
+          <Space wrap>
+            <Button onClick={() => setSelected([])} disabled={batchRunning}>清空选择</Button>
+            <Button
+              type="primary"
+              icon={<SyncOutlined spin={batchRunning} />}
+              disabled={selectedDatasets.length === 0}
+              loading={batchRunning}
+              onClick={confirmBatch}
+            >
+              {batchRunning ? '正在提交刷新请求' : '批量刷新'}
+            </Button>
+          </Space>
+        </div>
+      )}
+
+      {batchRunning && (
+        <Alert
+          type="info"
+          showIcon
+          message={`正在提交 ${selectedDatasets.length} 个数据集的刷新请求`}
+          description="这是请求提交阶段，不代表 Power BI 已完成刷新。提交完成后可在各数据集的刷新记录中继续查看执行状态。"
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
+      {batchResult && batchResult.failures.length === 0 && (
+        <Alert
+          type="success"
+          showIcon
+          closable
+          onClose={() => setBatchResult(null)}
+          message={`批量提交完成：${batchResult.success} / ${batchResult.total} 成功`}
+          description="刷新任务已经提交到 Power BI；实际处理状态请在数据集的刷新记录中查看。"
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       <Table<DatasetView>
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
         scroll={{ x: 1050 }}
+        locale={{
+          emptyText: (
+            <TableEmpty
+              title={keyword ? '没有匹配的数据集' : '暂无数据集'}
+              description={keyword ? '尝试调整数据集或工作区关键词。' : '当前环境没有可显示的数据集。'}
+            />
+          ),
+        }}
         rowSelection={{
           selectedRowKeys: selected,
           onChange: setSelected,
           preserveSelectedRowKeys: true,
           getCheckboxProps: (d) => ({ disabled: !d.isRefreshable }),
         }}
-        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 个`,
+          onShowSizeChange: (_, size) => setPageSize(size),
+        }}
         columns={[
           { title: '数据集', dataIndex: 'name', ellipsis: true },
           { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true },
           {
-            title: '可刷新',
+            title: '刷新能力',
             dataIndex: 'isRefreshable',
-            width: 75,
-            render: (v?: boolean) => (v ? <Tag color="green">是</Tag> : '-'),
+            width: 90,
+            render: (v?: boolean) => (v ? <Tag color="green">可刷新</Tag> : <Tag>不可刷新</Tag>),
           },
           {
-            title: '网关',
+            title: '连接',
             dataIndex: 'isOnPremGatewayRequired',
-            width: 70,
-            render: (v?: boolean) => (v ? <Tag color="orange">本地</Tag> : '云'),
+            width: 90,
+            render: (v?: boolean) => (v ? <Tag color="orange">本地网关</Tag> : <Tag color="blue">云端</Tag>),
           },
           { title: '关联报表', dataIndex: 'reportCount', width: 85 },
           {
@@ -202,13 +264,13 @@ export default function DatasetsPage() {
             dataIndex: 'configuredBy',
             width: 150,
             ellipsis: true,
-            render: (v?: string) => v ?? '-',
+            render: (v?: string) => v ?? <span className="text-muted">未知</span>,
           },
           {
             title: '修改时间',
             dataIndex: 'modifiedDate',
-            width: 130,
-            render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
+            width: 145,
+            render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : <span className="text-muted">未知</span>),
           },
           {
             title: '操作',
@@ -239,9 +301,7 @@ export default function DatasetsPage() {
                     ],
                   }}
                 >
-                  <a onClick={(e) => e.preventDefault()}>
-                    <MoreOutlined /> 更多
-                  </a>
+                  <a onClick={(e) => e.preventDefault()}><MoreOutlined /> 更多</a>
                 </Dropdown>
               </Space>
             ),
@@ -252,11 +312,7 @@ export default function DatasetsPage() {
       {batchResult && batchResult.failures.length > 0 && (
         <Modal
           open
-          footer={
-            <Button type="primary" onClick={() => setBatchResult(null)}>
-              知道了
-            </Button>
-          }
+          footer={<Button type="primary" onClick={() => setBatchResult(null)}>知道了</Button>}
           onCancel={() => setBatchResult(null)}
           title={`批量刷新结果：成功 ${batchResult.success} / ${batchResult.total}`}
         >
@@ -271,9 +327,7 @@ export default function DatasetsPage() {
             {batchResult.failures.map((f, index) => (
               <li key={`${f.name}-${index}`} style={{ marginBottom: 8 }}>
                 <Typography.Text strong>{f.name}</Typography.Text>
-                <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                  {f.error}
-                </div>
+                <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>{f.error}</div>
               </li>
             ))}
           </ul>
@@ -300,6 +354,7 @@ export default function DatasetsPage() {
           size="small"
           dataSource={boundReports}
           pagination={{ pageSize: 10 }}
+          locale={{ emptyText: <TableEmpty title="暂无关联报表" /> }}
           columns={[
             { title: '报表', dataIndex: 'name', ellipsis: true },
             { title: '所在工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },
@@ -308,22 +363,14 @@ export default function DatasetsPage() {
               width: 80,
               render: (_: unknown, r) =>
                 r.webUrl ? (
-                  <Typography.Link href={r.webUrl} target="_blank">
-                    打开 <ExportOutlined />
-                  </Typography.Link>
-                ) : (
-                  '-'
-                ),
+                  <Typography.Link href={r.webUrl} target="_blank">打开 <ExportOutlined /></Typography.Link>
+                ) : <span className="text-muted">无链接</span>,
             },
           ]}
         />
       </Modal>
 
-      <RefreshHistoryDrawer
-        open={!!historyDataset}
-        dataset={historyDataset}
-        onClose={() => setHistoryDataset(null)}
-      />
+      <RefreshHistoryDrawer open={!!historyDataset} dataset={historyDataset} onClose={() => setHistoryDataset(null)} />
       <Drawer
         open={!!usersDataset}
         onClose={() => setUsersDataset(null)}
@@ -333,11 +380,7 @@ export default function DatasetsPage() {
         {usersError && <ErrorAlert error={usersError} />}
         <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
       </Drawer>
-      <SchemaDrawer
-        open={!!schemaDataset}
-        dataset={schemaDataset}
-        onClose={() => setSchemaDataset(null)}
-      />
+      <SchemaDrawer open={!!schemaDataset} dataset={schemaDataset} onClose={() => setSchemaDataset(null)} />
       <RefreshModal
         open={!!refreshDataset}
         dataset={refreshDataset}
