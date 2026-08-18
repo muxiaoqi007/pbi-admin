@@ -17,7 +17,7 @@ function xmlDecode(value: string): string {
 function rows(xml: string): Record<string, string>[] {
   return Array.from(xml.matchAll(/<(?:row|Row)(?:\s[^>]*)?>([\s\S]*?)<\/(?:row|Row)>/g)).map((match) => {
     const result: Record<string, string> = {}
-    for (const cell of match[1].matchAll(/<([A-Za-z_][\w.-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\\1>/g)) result[cell[1]] = xmlDecode(cell[2].replace(/<[^>]+>/g, '').trim())
+    for (const cell of match[1].matchAll(/<([A-Za-z_][\w.-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/g)) result[cell[1]] = xmlDecode(cell[2].replace(/<[^>]+>/g, '').trim())
     return result
   })
 }
