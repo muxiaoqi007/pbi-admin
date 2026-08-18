@@ -5,6 +5,9 @@ import Database from 'better-sqlite3'
 import type { PbiDatasource, PbiTable } from './types'
 
 const dataDir = path.join(process.cwd(), 'data')
+const TABLE_CACHE_TTL_MS = 30 * 60 * 1000
+const DATASOURCE_INDEX_TTL_MS = 10 * 60 * 1000
+
 fs.mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'catalog.sqlite'))
 db.pragma('journal_mode = WAL')
@@ -31,6 +34,11 @@ CREATE INDEX IF NOT EXISTS idx_sources_env ON dataset_datasources(environment_id
 CREATE TABLE IF NOT EXISTS catalog_state (environment_id TEXT NOT NULL, cache_key TEXT NOT NULL, value_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(environment_id,cache_key));
 `)
 
+function isFresh(timestamp: string, ttlMs: number): boolean {
+  const at = Date.parse(timestamp)
+  return Number.isFinite(at) && Date.now() - at < ttlMs
+}
+
 export function saveDatasetTables(input: { environmentId: string; workspaceId: string; datasetId: string; datasetName?: string; workspaceName?: string; source: string; tables: PbiTable[]; fetchedAt: string }) {
   const row = { ...input, datasetName: input.datasetName ?? null, workspaceName: input.workspaceName ?? null }
   const tx = db.transaction(() => {
@@ -54,7 +62,7 @@ export function saveDatasetCatalog(environmentId: string, datasets: Array<{ id: 
 export function loadDatasetTables(environmentId: string, workspaceId: string, datasetId: string): { tables: PbiTable[]; source: string; fetchedAt: string } | null {
   const rows = db.prepare(`SELECT table_name,is_hidden,source,updated_at FROM dataset_tables
     WHERE environment_id=? AND workspace_id=? AND dataset_id=? ORDER BY table_name`).all(environmentId, workspaceId, datasetId) as Array<{table_name:string;is_hidden:number|null;source:string;updated_at:string}>
-  if (!rows.length) return null
+  if (!rows.length || !isFresh(rows[0].updated_at, TABLE_CACHE_TTL_MS)) return null
   return { tables: rows.map(r => ({ name: r.table_name, isHidden: r.is_hidden == null ? undefined : Boolean(r.is_hidden) })), source: rows[0].source, fetchedAt: rows[0].updated_at }
 }
 
@@ -92,5 +100,7 @@ export function saveCatalogState(environmentId: string, key: string, value: unkn
 
 export function loadCatalogState<T>(environmentId: string, key: string): { value: T; updatedAt: string } | null {
   const row = db.prepare('SELECT value_json,updated_at FROM catalog_state WHERE environment_id=? AND cache_key=?').get(environmentId, key) as {value_json:string;updated_at:string}|undefined
-  return row ? { value: JSON.parse(row.value_json) as T, updatedAt: row.updated_at } : null
+  if (!row) return null
+  if (key === 'datasource-index' && !isFresh(row.updated_at, DATASOURCE_INDEX_TTL_MS)) return null
+  return { value: JSON.parse(row.value_json) as T, updatedAt: row.updated_at }
 }

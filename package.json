@@ -2,11 +2,15 @@
   "name": "pbi-admin",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
@@ -18,7 +22,7 @@
     "dayjs": "^1.11.22",
     "fzstd": "^0.1.1",
     "lz4js": "^0.2.0",
-    "next": "15.5.21",
+    "next": "16.3.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "swr": "^2.5.1",

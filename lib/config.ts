@@ -1,13 +1,15 @@
-﻿import fs from 'fs'
+import fs from 'fs'
 import path from 'path'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto'
 import { CLOUD_PRESETS, isCloudEnv } from './cloud'
 import type { AuthType, CloudEnv, RuntimeConfig } from './types'
 import { isSafePbiUrl } from './validation'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json')
+const ENCRYPTED_PREFIX = 'enc:v1:'
 
-/** 涓€涓鎴风幆澧?= 涓€濂椾簯绔?+ 绉熸埛 + 鏈嶅姟涓讳綋鍑嵁 */
+/** 一个租户环境 = 一套云端、租户与认证凭据。 */
 export interface Environment {
   id: string
   name: string
@@ -34,7 +36,54 @@ function newId(): string {
   return `env-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-/** 鐜鍙橀噺鍏滃簳鐜锛堟湭淇濆瓨鍒版枃浠讹紝浣滀负鍒濆榛樿鍊硷級 */
+function configEncryptionKey(): Buffer | null {
+  const raw = process.env.PBI_CONFIG_ENCRYPTION_KEY
+  return raw ? createHash('sha256').update(raw).digest() : null
+}
+
+function encryptSecret(value: string): string {
+  if (!value || value.startsWith(ENCRYPTED_PREFIX)) return value
+  const key = configEncryptionKey()
+  if (!key) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        '生产环境保存凭据必须设置 PBI_CONFIG_ENCRYPTION_KEY；如只使用环境变量配置，则无需写入 data/config.json。',
+      )
+    }
+    return value
+  }
+
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `${ENCRYPTED_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`
+}
+
+function decryptSecret(value: string): string {
+  if (!value || !value.startsWith(ENCRYPTED_PREFIX)) return value
+  const key = configEncryptionKey()
+  if (!key) {
+    throw new Error('配置文件包含加密凭据，但未设置 PBI_CONFIG_ENCRYPTION_KEY，无法解密。')
+  }
+  const payload = value.slice(ENCRYPTED_PREFIX.length)
+  const [ivRaw, tagRaw, encryptedRaw] = payload.split('.')
+  if (!ivRaw || !tagRaw || !encryptedRaw) {
+    throw new Error('配置文件中的加密凭据格式无效。')
+  }
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivRaw, 'base64url'))
+    decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'))
+    return Buffer.concat([
+      decipher.update(Buffer.from(encryptedRaw, 'base64url')),
+      decipher.final(),
+    ]).toString('utf8')
+  } catch {
+    throw new Error('配置凭据解密失败，请确认 PBI_CONFIG_ENCRYPTION_KEY 与保存配置时一致。')
+  }
+}
+
+/** 环境变量兜底环境：不写入配置文件，适合容器/秘密管理系统注入。 */
 function envFromEnvVars(): Environment {
   const cloud = process.env.PBI_CLOUD
   return {
@@ -48,49 +97,67 @@ function envFromEnvVars(): Environment {
   }
 }
 
-function readConfigFile(): ConfigFile {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as Record<string, unknown>
-      if (saved && Array.isArray(saved.environments)) {
-        return {
-          version: 2,
-          activeEnvId: typeof saved.activeEnvId === 'string' ? saved.activeEnvId : undefined,
-          environments: (saved.environments as Environment[]).map((e) => ({
-            ...e,
-            authType: e.authType ?? 'servicePrincipal',
-          })),
-        }
-      }
-      // v1 鎵佸钩鏍煎紡 鈫?鑷姩杩佺Щ涓哄崟鐜
-      if (saved && typeof saved === 'object' && 'tenantId' in saved) {
-        const env: Environment = {
-          id: newId(),
-          name: '默认环境',
-          cloud: isCloudEnv(saved.cloud) ? saved.cloud : 'global',
-          authType: 'servicePrincipal',
-          tenantId: String(saved.tenantId ?? ''),
-          clientId: String(saved.clientId ?? ''),
-          clientSecret: String(saved.clientSecret ?? ''),
-          authorityOverride: saved.authorityOverride ? String(saved.authorityOverride) : undefined,
-          apiBaseOverride: saved.apiBaseOverride ? String(saved.apiBaseOverride) : undefined,
-          resourceOverride: saved.resourceOverride ? String(saved.resourceOverride) : undefined,
-          xmlaEndpointOverride: saved.xmlaEndpointOverride ? String(saved.xmlaEndpointOverride) : undefined,
-        }
-        const cfg: ConfigFile = { version: 2, activeEnvId: env.id, environments: [env] }
-        writeConfigFile(cfg)
-        return cfg
-      }
-    }
-  } catch {
-    /* 閰嶇疆鏂囦欢鎹熷潖鏃惰涓虹┖閰嶇疆 */
+function decodeEnvironment(e: Environment): Environment {
+  return {
+    ...e,
+    authType: e.authType ?? 'servicePrincipal',
+    clientSecret: decryptSecret(String(e.clientSecret ?? '')),
+    password: e.password ? decryptSecret(String(e.password)) : undefined,
   }
+}
+
+function readConfigFile(): ConfigFile {
+  if (!fs.existsSync(CONFIG_FILE)) return { version: 2, environments: [] }
+
+  let saved: Record<string, unknown>
+  try {
+    saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as Record<string, unknown>
+  } catch {
+    throw new Error('配置文件 data/config.json 无法解析，请检查 JSON 是否损坏。')
+  }
+
+  if (Array.isArray(saved.environments)) {
+    return {
+      version: 2,
+      activeEnvId: typeof saved.activeEnvId === 'string' ? saved.activeEnvId : undefined,
+      environments: (saved.environments as Environment[]).map(decodeEnvironment),
+    }
+  }
+
+  // v1 扁平格式 → 迁移为单环境。迁移写盘仍遵守生产环境的凭据加密要求。
+  if ('tenantId' in saved) {
+    const env: Environment = {
+      id: newId(),
+      name: '默认环境',
+      cloud: isCloudEnv(saved.cloud) ? saved.cloud : 'global',
+      authType: 'servicePrincipal',
+      tenantId: String(saved.tenantId ?? ''),
+      clientId: String(saved.clientId ?? ''),
+      clientSecret: String(saved.clientSecret ?? ''),
+      authorityOverride: saved.authorityOverride ? String(saved.authorityOverride) : undefined,
+      apiBaseOverride: saved.apiBaseOverride ? String(saved.apiBaseOverride) : undefined,
+      resourceOverride: saved.resourceOverride ? String(saved.resourceOverride) : undefined,
+      xmlaEndpointOverride: saved.xmlaEndpointOverride ? String(saved.xmlaEndpointOverride) : undefined,
+    }
+    const cfg: ConfigFile = { version: 2, activeEnvId: env.id, environments: [env] }
+    writeConfigFile(cfg)
+    return cfg
+  }
+
   return { version: 2, environments: [] }
 }
 
 function writeConfigFile(cfg: ConfigFile) {
   fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8')
+  const persisted: ConfigFile = {
+    ...cfg,
+    environments: cfg.environments.map((env) => ({
+      ...env,
+      clientSecret: env.clientSecret ? encryptSecret(env.clientSecret) : '',
+      password: env.password ? encryptSecret(env.password) : undefined,
+    })),
+  }
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(persisted, null, 2), 'utf-8')
 }
 
 export function listEnvironments(): { environments: Environment[]; activeEnvId?: string } {
@@ -112,26 +179,32 @@ export function getActiveEnvironment(): Environment | null {
   return environments.find((e) => e.id === activeEnvId) ?? environments[0] ?? null
 }
 
-/** 鏂板缓鎴栨洿鏂扮幆澧冿紙鏈?id 涓斿瓨鍦ㄥ垯鏇存柊锛屽惁鍒欐柊寤猴級锛泂ecret 鐣欑┖娌跨敤鏃у€?*/
+/** 新建或更新环境；密钥/密码留空时沿用旧值。 */
 export function saveEnvironment(input: Partial<Environment> & { id?: string }): Environment {
   const cfg = readConfigFile()
   if (input.id !== undefined && !/^[A-Za-z0-9_-]{1,200}$/.test(input.id)) {
-    throw new Error('invalid environment id')
+    throw new Error('环境 ID 格式无效')
   }
-  const authorityOverride = normalizeOverride(input.authorityOverride, '璁よ瘉鍦板潃')
-  const apiBaseOverride = normalizeOverride(input.apiBaseOverride, 'API 鍩哄湴鍧€')
+
+  const authorityOverride = normalizeOverride(input.authorityOverride, '认证地址')
+  const apiBaseOverride = normalizeOverride(input.apiBaseOverride, 'API 基地址')
   const resourceOverride = normalizeOverride(input.resourceOverride, 'Token Resource')
-  const xmlaEndpointOverride = normalizeOverride(input.xmlaEndpointOverride, 'XMLA 鍦板潃')
+  const xmlaEndpointOverride = normalizeOverride(input.xmlaEndpointOverride, 'XMLA 地址')
   let env = input.id ? cfg.environments.find((e) => e.id === input.id) : undefined
+
   if (env) {
     env.name = (input.name ?? env.name).trim() || env.name
     if (isCloudEnv(input.cloud)) env.cloud = input.cloud
     if (isAuthType(input.authType)) env.authType = input.authType
     env.tenantId = (input.tenantId ?? env.tenantId).trim()
     env.clientId = (input.clientId ?? env.clientId).trim()
-    env.clientSecret = (input.clientSecret && input.clientSecret.trim()) || env.clientSecret
+    if (typeof input.clientSecret === 'string' && input.clientSecret.trim()) {
+      env.clientSecret = input.clientSecret.trim()
+    }
     env.username = (input.username ?? env.username)?.trim() || undefined
-    env.password = (input.password && input.password.trim()) || env.password
+    if (typeof input.password === 'string' && input.password.length > 0) {
+      env.password = input.password
+    }
     env.authorityOverride = authorityOverride
     env.apiBaseOverride = apiBaseOverride
     env.resourceOverride = resourceOverride
@@ -139,14 +212,14 @@ export function saveEnvironment(input: Partial<Environment> & { id?: string }): 
   } else {
     env = {
       id: input.id || newId(),
-      name: (input.name ?? '').trim() || 'unnamed',
+      name: (input.name ?? '').trim() || '未命名环境',
       cloud: isCloudEnv(input.cloud) ? input.cloud : 'global',
       authType: isAuthType(input.authType) ? input.authType : 'servicePrincipal',
       tenantId: (input.tenantId ?? '').trim(),
       clientId: (input.clientId ?? '').trim(),
       clientSecret: (input.clientSecret ?? '').trim(),
       username: input.username?.trim() || undefined,
-      password: input.password?.trim() || undefined,
+      password: typeof input.password === 'string' && input.password.length > 0 ? input.password : undefined,
       authorityOverride,
       apiBaseOverride,
       resourceOverride,
@@ -154,6 +227,15 @@ export function saveEnvironment(input: Partial<Environment> & { id?: string }): 
     }
     cfg.environments.push(env)
   }
+
+  // 当前 ROPC 实现是公共客户端流程，不需要也不应持久化 client_secret。
+  if (env.authType === 'password') {
+    env.clientSecret = ''
+  } else {
+    env.username = undefined
+    env.password = undefined
+  }
+
   writeConfigFile(cfg)
   return env
 }
@@ -175,7 +257,7 @@ export function setActiveEnvironment(id: string): boolean {
   return true
 }
 
-/** 瑙ｆ瀽杩愯鏃堕厤缃細婵€娲荤幆澧?+ 浜戦缃鐐?+ 瑕嗙洊椤?*/
+/** 解析运行时配置：激活环境 + 云预设端点 + 可选覆盖项。 */
 export async function resolveRuntime(): Promise<RuntimeConfig> {
   const env = getActiveEnvironment()
   const preset = env ? CLOUD_PRESETS[env.cloud] : CLOUD_PRESETS.global
@@ -189,6 +271,7 @@ export async function resolveRuntime(): Promise<RuntimeConfig> {
   const xmlaEndpointOverride = isSafePbiUrl(env?.xmlaEndpointOverride)
     ? env.xmlaEndpointOverride.replace(/\/+$/, '')
     : undefined
+
   return {
     envId: env?.id ?? '',
     envName: env?.name ?? '',
@@ -212,7 +295,7 @@ export function configReady(cfg: RuntimeConfig): boolean {
   return Boolean(hasTenant && cfg.clientSecret)
 }
 
-/** 杩斿洖缁欏墠绔殑鐜淇℃伅锛堝瘑閽ヨ劚鏁忥級 */
+/** 返回给前端的环境信息，敏感凭据只返回是否已保存及预览。 */
 export function maskEnvironment(e: Environment) {
   const secretLen = e.clientSecret.length
   const pwdLen = e.password?.length ?? 0
@@ -238,11 +321,12 @@ export function maskEnvironment(e: Environment) {
 function isAuthType(v: unknown): v is AuthType {
   return v === 'servicePrincipal' || v === 'password'
 }
+
 function normalizeOverride(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null || value === '') return undefined
   const normalized = typeof value === 'string' ? value.trim() : ''
   if (!isSafePbiUrl(normalized)) {
-    throw new Error(label + '蹇呴』鏄畨鍏ㄧ殑 HTTPS URL锛屼笖涓嶈兘鍖呭惈鍑嵁銆佹煡璇㈠弬鏁版垨鏈湴鍦板潃')
+    throw new Error(`${label} 必须是安全的 HTTPS Power BI/Microsoft URL，且不能包含凭据、查询参数、片段或本地地址`)
   }
   return normalized
 }

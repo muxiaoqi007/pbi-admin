@@ -13,6 +13,20 @@ export function isSafeText(value: unknown, maxLength = 500): value is string {
   return typeof value === 'string' && value.length <= maxLength && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
+function isTrustedPbiHost(host: string): boolean {
+  const normalized = host.toLowerCase()
+  return (
+    normalized === 'api.powerbi.com' ||
+    normalized === 'api.powerbi.cn' ||
+    normalized === 'login.microsoftonline.com' ||
+    normalized === 'login.chinacloudapi.cn' ||
+    normalized === 'analysis.windows.net' ||
+    normalized.endsWith('.analysis.windows.net') ||
+    normalized === 'analysis.chinacloudapi.cn' ||
+    normalized.endsWith('.analysis.chinacloudapi.cn')
+  )
+}
+
 /** Allow HTTPS endpoint overrides without allowing credentials or obvious local targets. */
 export function isSafeHttpsUrl(value: unknown): value is string {
   if (typeof value !== 'string' || value.length > 500 || !value.trim()) return false
@@ -26,18 +40,29 @@ export function isSafeHttpsUrl(value: unknown): value is string {
   }
 }
 
-/** Endpoint overrides are only intended for the Microsoft/Power BI service domains. */
+/** Endpoint overrides are only intended for Microsoft/Power BI service domains. */
 export function isSafePbiUrl(value: unknown): value is string {
-  if (!isSafeHttpsUrl(value)) return false
-  const host = new URL(value).hostname.toLowerCase()
-  return (
-    host === 'api.powerbi.com' ||
-    host === 'api.powerbi.cn' ||
-    host === 'login.microsoftonline.com' ||
-    host === 'login.chinacloudapi.cn' ||
-    host === 'analysis.windows.net' ||
-    host.endsWith('.analysis.windows.net') ||
-    host === 'analysis.chinacloudapi.cn' ||
-    host.endsWith('.analysis.chinacloudapi.cn')
-  )
+  return isSafeHttpsUrl(value) && isTrustedPbiHost(new URL(value).hostname)
+}
+
+/**
+ * Validate an absolute URL before forwarding a Power BI bearer token to it.
+ * Redirect targets may legitimately contain query parameters, so this guard is
+ * intentionally less strict than endpoint override validation while keeping the
+ * host allow-list and HTTPS/credential requirements.
+ */
+export function isTrustedPbiRequestUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2000 || !value.trim()) return false
+  try {
+    const url = new URL(value)
+    return (
+      url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      !url.hash &&
+      isTrustedPbiHost(url.hostname)
+    )
+  } catch {
+    return false
+  }
 }

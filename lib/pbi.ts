@@ -1,6 +1,7 @@
 ﻿import { getAccessToken, getAccessTokenDiagnostics } from './auth'
 import { getDatasetSchemaViaXmla, XmlaError } from './xmla'
 import { getActiveEnvironment, resolveRuntime } from './config'
+import { isTrustedPbiRequestUrl } from './validation'
 import { tableFromIPC } from 'apache-arrow'
 import { compressionRegistry } from 'apache-arrow/ipc/compression/registry'
 import { CompressionType } from 'apache-arrow/fb/compression-type'
@@ -42,7 +43,7 @@ export class PbiError extends Error {
 
 /** 统一的 Power BI REST 请求：自动带 token，手动跟随重定向（世纪互联 api.powerbi.cn
  *  会 302 到 wabi-*.analysis.chinacloudapi.cn 区域后端；跨域重定向可能丢弃
- *  Authorization 头，必须重定向后重新携带），401 时刷新 token 重试一次 */
+ *  Authorization 头，必须重定向后重新携带），401 时刷新 token 重试一次。 */
 async function pbiRequest(
   path: string,
   init?: RequestInit & { forceToken?: boolean },
@@ -50,6 +51,10 @@ async function pbiRequest(
   const { apiBase } = await resolveRuntime()
   const token = await getAccessToken(init?.forceToken)
   let url = path.startsWith('http') ? path : `${apiBase}${path}`
+  if (!isTrustedPbiRequestUrl(url)) {
+    throw new PbiError(400, '拒绝向非 Power BI/Microsoft 域名发送访问令牌', 'UNTRUSTED_PBI_URL')
+  }
+
   let res: Response
   for (let hop = 0; ; hop++) {
     res = await fetch(url, {
@@ -64,7 +69,15 @@ async function pbiRequest(
     })
     const location = res.headers.get('location')
     if ([301, 302, 303, 307, 308].includes(res.status) && location && hop < 5) {
-      url = new URL(location, url).toString()
+      const nextUrl = new URL(location, url).toString()
+      if (!isTrustedPbiRequestUrl(nextUrl)) {
+        throw new PbiError(
+          502,
+          'Power BI 返回了不受信任的重定向地址，已拒绝转发访问令牌',
+          'UNTRUSTED_PBI_REDIRECT',
+        )
+      }
+      url = nextUrl
       continue
     }
     break
@@ -235,13 +248,13 @@ async function toPbiError(res: Response): Promise<PbiError> {
   if (res.status === 401) {
     message = text.trim()
       ? `认证未通过 (HTTP 401)：${message}`
-      : '认证未通过 (HTTP 401，服务无详细信息)。世纪互联的管理 API 不支持服务主体，本工具会自动降级为成员模式（仅显示服务主体已加入的工作区）；若应为管理模式，请检查租户设置「允许服务主体使用 Power BI API」。'
+      : '认证未通过 (HTTP 401，服务无详细信息)。管理 API 不可用时，本工具会自动降级为成员模式（仅显示当前身份可访问的工作区）；若应为管理模式，请检查租户设置和权限。'
   }
   return new PbiError(res.status, message, code)
 }
 
 // ---------------------------------------------------------------------------
-// 全租户快照：优先管理模式（admin API），世纪互联下自动降级为成员模式（普通 API）
+// 全租户快照：优先管理模式（admin API），不可用时降级为成员模式（普通 API）
 // ---------------------------------------------------------------------------
 
 const SNAPSHOT_TTL_MS = 5 * 60 * 1000
@@ -252,7 +265,7 @@ function activeEnvId(): string {
   return getActiveEnvironment()?.id ?? ''
 }
 
-/** 当前快照模式：admin = 全租户管理 API；member = 服务主体可见的工作区 */
+/** 当前快照模式：admin = 全租户管理 API；member = 当前身份可见的工作区 */
 export function getSnapshotMode(): 'admin' | 'member' {
   return snapshotCache && snapshotCache.envId === activeEnvId()
     ? snapshotCache.data.mode
@@ -300,12 +313,11 @@ function buildSnapshot(
   return { mode, fetchedAt, workspaces: wsViews, reports, datasets: datasetViews }
 }
 
-/** 管理模式：/admin/groups 一次展开（世纪互联不支持服务主体调管理 API，会 401） */
+/** 管理模式：/admin/groups 一次展开。 */
 async function scanAsAdmin(): Promise<TenantSnapshot> {
   const PAGE = 5000
   const workspaces: PbiWorkspace[] = []
   for (let skip = 0; ; skip += PAGE) {
-    // 用 /admin/groups 而非 /admin/workspaces：世纪互联没有 /admin/workspaces 路由
     const page = await pbiJson<{ value: PbiWorkspace[] }>(
       `/admin/groups?$expand=users,reports,datasets&$top=${PAGE}&$skip=${skip}`,
     )
@@ -315,7 +327,7 @@ async function scanAsAdmin(): Promise<TenantSnapshot> {
   return buildSnapshot('admin', workspaces)
 }
 
-/** 成员模式：/groups 拿服务主体可见的工作区，再逐工作区取数据集/报表/成员 */
+/** 成员模式：/groups 拿当前身份可见的工作区，再逐工作区取数据集/报表/成员。 */
 async function scanAsMember(): Promise<TenantSnapshot> {
   const groupsRes = await pbiJson<{ value: { id: string; name: string; isOnDedicatedCapacity?: boolean }[] }>(
     `/groups?$top=5000`,
@@ -364,9 +376,9 @@ export async function getTenantSnapshot(force = false): Promise<TenantSnapshot> 
   try {
     snapshot = await scanAsAdmin()
   } catch (e) {
-    if (e instanceof PbiError && (e.status === 401 || e.status === 403)) {
-      // 世纪互联：管理 API 不接受服务主体 → 成员模式降级
+    if (e instanceof PbiError && [401, 403, 404].includes(e.status)) {
       snapshot = await scanAsMember()
+      snapshot.adminFallbackReason = `Admin API HTTP ${e.status}：${e.message}`.slice(0, 1200)
     } else {
       throw e
     }
@@ -383,7 +395,7 @@ export async function getReportUsers(reportId: string): Promise<PbiAdminUser[]> 
   if (getSnapshotMode() === 'member') {
     throw new PbiError(
       401,
-      '成员模式（管理 API 不可用）：世纪互联不支持查询报表级别的单独授权用户，可在报表所在工作区的详情中查看成员列表。租户内开通服务主体管理 API 后自动恢复。',
+      '成员模式（管理 API 不可用）：当前环境无法查询报表级别的单独授权用户，可在报表所在工作区的详情中查看成员列表。',
     )
   }
   const data = await pbiJson<{ value: PbiAdminUser[] }>(`/admin/reports/${reportId}/users`)
@@ -461,7 +473,7 @@ export async function getRefreshHistory(workspaceId: string, datasetId: string):
   try {
     return sorted(await listRefreshesAdmin(workspaceId, datasetId))
   } catch (e) {
-    // 世纪互联没有管理版刷新记录路由（404），回落到普通路由
+    // 某些环境没有管理版刷新记录路由，回落到普通路由
     if (e instanceof PbiError && [401, 403, 404].includes(e.status)) {
       return sorted(await listRefreshesMember(workspaceId, datasetId))
     }
@@ -567,22 +579,20 @@ export async function getRefreshables(): Promise<PbiRefreshable[]> {
 }
 
 // ---------------------------------------------------------------------------
-// 触发刷新
+// 触发刷新（保留旧导出供兼容；新 API 路由使用 lib/refresh.ts）
 // ---------------------------------------------------------------------------
 
 export interface RefreshRequest {
   workspaceId: string
   datasetId: string
-  /** all = 经典全量；allEnhanced = 增强全量（可用处理类型/并行/重试）；tables = 选表增强刷新 */
+  /** all = 经典全量；allEnhanced = 增强全量；tables = 选表增强刷新 */
   mode: 'all' | 'allEnhanced' | 'tables'
   tables?: string[]
   type?: RefreshType
   retryCount?: number
   maxParallelism?: number
   commitMode?: 'transactional' | 'partialBatch'
-  /** 增量刷新策略：false = 忽略策略强制完整刷新 */
   applyRefreshPolicy?: boolean
-  /** 增量刷新的有效日期（ISO），未填用服务端当前时间 */
   effectiveDate?: string
 }
 
@@ -602,7 +612,6 @@ export async function triggerRefresh(req: RefreshRequest): Promise<Accepted> {
       commitMode: req.commitMode ?? 'transactional',
       maxParallelism: req.maxParallelism ?? 1,
       retryCount: req.retryCount ?? 0,
-      notifyOption: 'NoNotification',
     }
     if (req.mode === 'tables') {
       body.objects = (req.tables ?? []).map((t) => ({ table: t }))
@@ -926,4 +935,3 @@ export async function getConnectionDiagnostics(force = false) {
 
 export function invalidateSchemaCache() { schemaCache.clear() }
 export function invalidatePbiCaches() { snapshotCache = null; failuresCache = null; schemaCache.clear() }
-
