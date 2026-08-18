@@ -167,7 +167,6 @@ export default function SettingsPage() {
   const activeEnvId = data?.activeEnvId
   const selectedEnv = environments.find((e) => e.id === selectedId) ?? null
   const isNew = selectedId === 'new'
-  const isReadOnly = Boolean(selectedEnv?.readOnly)
   const cloud = Form.useWatch('cloud', form) ?? selectedEnv?.cloud ?? 'global'
   const preset = CLOUD_PRESETS[cloud as CloudEnv] ?? CLOUD_PRESETS.global
   const authType = Form.useWatch('authType', form) ?? selectedEnv?.authType ?? 'servicePrincipal'
