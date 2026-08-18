@@ -48,11 +48,12 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false)
   const [switchingEnvId, setSwitchingEnvId] = useState<string | null>(null)
   const [switchEnvError, setSwitchEnvError] = useState<string | null>(null)
+  const isLogin = pathname === '/login'
 
   const { data: configData } = useSWR<{
     activeEnvId?: string
     environments: { id: string; name: string; cloud: CloudEnv }[]
-  }>(pathname === '/settings' ? null : '/api/config', fetcher)
+  }>(pathname === '/settings' || isLogin ? null : '/api/config', fetcher)
   const envs = configData?.environments ?? []
   const activeEnvId = configData?.activeEnvId
 
@@ -83,76 +84,80 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
       }}
     >
       <AntApp>
-        <Layout style={{ minHeight: '100vh' }}>
-          <Header
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              background: '#001529',
-              paddingInline: 16,
-            }}
-          >
-            <Link href="/" style={{ color: '#fff', fontSize: 17, fontWeight: 600, whiteSpace: 'nowrap' }}>
-              Power BI 管理运维平台
-            </Link>
-            <span className="header-subtitle" style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12 }}>
-              国际版 / 世纪互联
-            </span>
-            <div style={{ flex: 1 }} />
-            {switchEnvError && (
-              <Tooltip title={switchEnvError}>
-                <Tag
-                  color="error"
-                  closable
-                  onClose={() => setSwitchEnvError(null)}
-                  style={{ marginInlineEnd: 0 }}
-                >
-                  环境切换失败
-                </Tag>
-              </Tooltip>
-            )}
-            {envs.length > 0 ? (
-              <Select
-                aria-label="当前 Power BI 环境"
-                size="small"
-                value={activeEnvId}
-                onChange={switchEnv}
-                loading={Boolean(switchingEnvId)}
-                disabled={Boolean(switchingEnvId)}
-                style={{ width: 220 }}
-                popupMatchSelectWidth={false}
-                options={envs.map((e) => ({
-                  value: e.id,
-                  label: `${e.name}（${e.cloud === 'china' ? '世纪互联' : '国际版'}）`,
-                }))}
-              />
-            ) : pathname !== '/settings' && configData ? (
-              <Link href="/settings">
-                <Button size="small">配置环境</Button>
-              </Link>
-            ) : null}
-          </Header>
-          <Layout>
-            <Sider
-              collapsible
-              collapsed={collapsed}
-              onCollapse={setCollapsed}
-              width={180}
-              theme="dark"
+        {isLogin ? (
+          children
+        ) : (
+          <Layout style={{ minHeight: '100vh' }}>
+            <Header
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                background: '#001529',
+                paddingInline: 16,
+              }}
             >
-              <Menu
-                mode="inline"
+              <Link href="/" style={{ color: '#fff', fontSize: 17, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                Power BI 管理运维平台
+              </Link>
+              <span className="header-subtitle" style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12 }}>
+                国际版 / 世纪互联
+              </span>
+              <div style={{ flex: 1 }} />
+              {switchEnvError && (
+                <Tooltip title={switchEnvError}>
+                  <Tag
+                    color="error"
+                    closable
+                    onClose={() => setSwitchEnvError(null)}
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    环境切换失败
+                  </Tag>
+                </Tooltip>
+              )}
+              {envs.length > 0 ? (
+                <Select
+                  aria-label="当前 Power BI 环境"
+                  size="small"
+                  value={activeEnvId}
+                  onChange={switchEnv}
+                  loading={Boolean(switchingEnvId)}
+                  disabled={Boolean(switchingEnvId)}
+                  style={{ width: 220 }}
+                  popupMatchSelectWidth={false}
+                  options={envs.map((e) => ({
+                    value: e.id,
+                    label: `${e.name}（${e.cloud === 'china' ? '世纪互联' : '国际版'}）`,
+                  }))}
+                />
+              ) : pathname !== '/settings' && configData ? (
+                <Link href="/settings">
+                  <Button size="small">配置环境</Button>
+                </Link>
+              ) : null}
+            </Header>
+            <Layout>
+              <Sider
+                collapsible
+                collapsed={collapsed}
+                onCollapse={setCollapsed}
+                width={180}
                 theme="dark"
-                selectedKeys={[selectedKey]}
-                items={MENU_ITEMS}
-                onClick={({ key }) => router.push(key)}
-                style={{ height: '100%', borderRight: 0, paddingTop: 8 }}
-              />
-            </Sider>
-            <Content className="page-content">{children}</Content>
+              >
+                <Menu
+                  mode="inline"
+                  theme="dark"
+                  selectedKeys={[selectedKey]}
+                  items={MENU_ITEMS}
+                  onClick={({ key }) => router.push(key)}
+                  style={{ height: '100%', borderRight: 0, paddingTop: 8 }}
+                />
+              </Sider>
+              <Content className="page-content">{children}</Content>
+            </Layout>
           </Layout>
-        </Layout>
+        )}
       </AntApp>
     </ConfigProvider>
   )
