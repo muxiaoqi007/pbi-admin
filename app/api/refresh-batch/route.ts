@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
-import { triggerRefresh } from '@/lib/pbi'
+import { triggerRefresh } from '@/lib/refresh'
 import { isPlainObject, isSafeId, isSafeText } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
