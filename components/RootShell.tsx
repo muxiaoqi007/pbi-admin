@@ -96,10 +96,7 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
       }}
     >
       <AntApp>
-        {isLogin ? (
-          children
-        ) : (
-          <Layout style={{ minHeight: '100vh' }}>
+        <Layout style={{ minHeight: '100vh' }}>
             <Header className="app-header">
               <Link href="/" className="app-brand">
                 <span className="app-brand-mark">P</span>
@@ -173,7 +170,6 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
               <Content className="page-content">{children}</Content>
             </Layout>
           </Layout>
-        )}
       </AntApp>
     </ConfigProvider>
   )
