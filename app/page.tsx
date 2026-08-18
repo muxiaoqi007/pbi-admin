@@ -1,7 +1,15 @@
 'use client'
 
-import { Alert, Button, Card, Col, Row, Statistic, Table, Tag, Tooltip } from 'antd'
-import { CheckCircleOutlined, DownloadOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
+import { useMemo } from 'react'
+import Link from 'next/link'
+import { Alert, Button, Card, Col, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
+import {
+  CheckCircleOutlined,
+  DownloadOutlined,
+  ReloadOutlined,
+  SyncOutlined,
+  WarningOutlined,
+} from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
@@ -10,15 +18,38 @@ import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
+import {
+  buildOpsHealth,
+  type RefreshFailureLike,
+  type RefreshHealthItem,
+  type WorkspaceHealthItem,
+  type WorkspaceHealthState,
+} from '@/lib/ops-health'
 import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
 
-interface RefreshFailureItem {
-  datasetId: string
-  datasetName: string
-  workspaceName: string
-  startTime: string
-  refreshType?: string
-  error?: string
+function formatDuration(seconds?: number) {
+  if (seconds === undefined) return '-'
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.round(seconds % 60)
+  if (minutes < 60) return `${minutes}m ${rest}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+function workspaceStateMeta(state: WorkspaceHealthState) {
+  switch (state) {
+    case 'critical':
+      return { label: '异常', color: 'red' as const }
+    case 'watch':
+      return { label: '需观察', color: 'orange' as const }
+    case 'active':
+      return { label: '运行中', color: 'processing' as const }
+    case 'healthy':
+      return { label: '正常', color: 'green' as const }
+    default:
+      return { label: '未监控', color: 'default' as const }
+  }
 }
 
 export default function OverviewPage() {
@@ -32,24 +63,46 @@ export default function OverviewPage() {
 
   const memberMode = snapshot?.mode === 'member'
   const snapshotLoaded = Boolean(snapshot)
-  const { data: failuresData, error: failuresError, isValidating: failuresValidating, mutate: mutateFailures } =
-    useSWR<{ failures: RefreshFailureItem[] }>(snapshotLoaded ? '/api/refresh-failures' : null, fetcher, {
-      revalidateOnFocus: false,
-    })
-  const failures = failuresData?.failures ?? []
+  const {
+    data: failuresData,
+    error: failuresError,
+    isValidating: failuresValidating,
+    mutate: mutateFailures,
+  } = useSWR<{ failures: RefreshFailureLike[] }>(snapshotLoaded ? '/api/refresh-failures' : null, fetcher, {
+    revalidateOnFocus: false,
+  })
+  const failures = useMemo(() => failuresData?.failures ?? [], [failuresData])
 
-  const { data: refreshablesData, error: refreshablesError } = useSWR<{
-    refreshables: PbiRefreshable[]
-  }>(snapshot && snapshot.mode !== 'member' ? '/api/refreshables' : null, fetcher)
+  const {
+    data: refreshablesData,
+    error: refreshablesError,
+    isValidating: refreshablesValidating,
+    mutate: mutateRefreshables,
+  } = useSWR<{ refreshables: PbiRefreshable[] }>(
+    snapshot && snapshot.mode !== 'member' ? '/api/refreshables' : null,
+    fetcher,
+    { refreshInterval: 30_000, revalidateOnFocus: false },
+  )
+  const refreshables = useMemo(() => refreshablesData?.refreshables ?? [], [refreshablesData])
+  const health = useMemo(
+    () => buildOpsHealth(snapshot, refreshables, failures),
+    [snapshot, refreshables, failures],
+  )
 
-  const refreshables = refreshablesData?.refreshables ?? []
-  const refreshCompleted = refreshables.filter((r) => r.lastRefresh?.status === 'Completed').length
-  const refreshFailed = refreshables.filter((r) => r.lastRefresh?.status === 'Failed').length
-  const refreshActive = refreshables.filter((r) => ['InProgress', 'NotStarted'].includes(r.lastRefresh?.status ?? '')).length
+  const memberCount = useMemo(
+    () => new Set((snapshot?.workspaces ?? []).flatMap((workspace) => workspace.users.map((user) => user.identifier))).size,
+    [snapshot],
+  )
+  const healthLoading = isValidating || failuresValidating || refreshablesValidating
 
-  const memberCount = new Set(
-    (snapshot?.workspaces ?? []).flatMap((w) => w.users.map((u) => u.identifier)),
-  ).size
+  async function refreshAll() {
+    const tasks: Promise<unknown>[] = [
+      mutate(() => fetcher('/api/snapshot?force=1')),
+      mutateFailures(() => fetcher('/api/refresh-failures?force=1')),
+    ]
+    if (!memberMode) tasks.push(mutateRefreshables())
+    await Promise.all(tasks)
+  }
 
   function exportAll() {
     if (!snapshot) return
@@ -57,54 +110,77 @@ export default function OverviewPage() {
     exportCSV(
       `数据集清单_${date}.csv`,
       ['数据集', '工作区', '可刷新', '需要网关', '关联报表数', '配置者', '修改时间', 'ID'],
-      snapshot.datasets.map((d) => [
-        d.name,
-        d.workspaceName,
-        d.isRefreshable ? '是' : '否',
-        d.isOnPremGatewayRequired ? '是' : '否',
-        d.reportCount,
-        d.configuredBy ?? '',
-        d.modifiedDate ? dayjs(d.modifiedDate).format('YYYY-MM-DD HH:mm') : '',
-        d.id,
+      snapshot.datasets.map((dataset) => [
+        dataset.name,
+        dataset.workspaceName,
+        dataset.isRefreshable ? '是' : '否',
+        dataset.isOnPremGatewayRequired ? '是' : '否',
+        dataset.reportCount,
+        dataset.configuredBy ?? '',
+        dataset.modifiedDate ? dayjs(dataset.modifiedDate).format('YYYY-MM-DD HH:mm') : '',
+        dataset.id,
       ]),
     )
     setTimeout(() => {
       exportCSV(
         `报表清单_${date}.csv`,
         ['报表', '工作区', '数据集ID', '类型', '修改时间', '链接'],
-        snapshot.reports.map((r) => [
-          r.name,
-          r.workspaceName,
-          r.datasetId ?? '',
-          r.reportType ?? '',
-          r.modifiedDateTime ? dayjs(r.modifiedDateTime).format('YYYY-MM-DD HH:mm') : '',
-          r.webUrl ?? '',
+        snapshot.reports.map((report) => [
+          report.name,
+          report.workspaceName,
+          report.datasetId ?? '',
+          report.reportType ?? '',
+          report.modifiedDateTime ? dayjs(report.modifiedDateTime).format('YYYY-MM-DD HH:mm') : '',
+          report.webUrl ?? '',
         ]),
       )
     }, 500)
+  }
+
+  function exportIssues() {
+    exportCSV(
+      `运维待处理_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['问题类型', '数据集', '工作区', '最近状态', '当前耗时', '历史基线', '耗时倍数', '错误'],
+      health.actionableItems.map((item) => [
+        item.status === 'Failed' ? '刷新失败' : '耗时离群',
+        item.name,
+        item.workspaceName ?? '',
+        item.status,
+        item.durationSeconds ?? '',
+        item.baselineSeconds ?? '',
+        item.durationRatio ? item.durationRatio.toFixed(2) : '',
+        item.error ?? '',
+      ]),
+    )
   }
 
   return (
     <div>
       <PageHeader
         title="运营总览"
-        description="快速判断租户规模、刷新健康与异常数据集，把需要处理的问题放在最前面。"
+        description="先看需要处理的工作区和数据集，再进入具体刷新记录、模型或数据源排查。"
         meta={
-          snapshot
-            ? `数据快照：${dayjs(snapshot.fetchedAt).format('YYYY-MM-DD HH:mm:ss')} · ${memberMode ? '成员模式' : '租户管理模式'}`
-            : isLoading
-              ? '正在加载租户数据…'
-              : undefined
+          snapshot ? (
+            <Space size={6} wrap>
+              <Tag color={memberMode ? 'orange' : 'green'}>{memberMode ? '成员模式' : '租户管理模式'}</Tag>
+              <Tag>工作区 {snapshot.workspaces.length}</Tag>
+              <Tag>报表 {snapshot.reports.length}</Tag>
+              <Tag>数据集 {snapshot.datasets.length}</Tag>
+              <Tag>成员 {memberCount}</Tag>
+              <span className="text-muted">快照 {dayjs(snapshot.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}</span>
+            </Space>
+          ) : isLoading ? (
+            '正在加载租户数据…'
+          ) : undefined
         }
         actions={
           <>
-            <Button
-              icon={<ReloadOutlined />}
-              loading={isValidating}
-              onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
-            >
-              刷新快照
+            <Button icon={<ReloadOutlined />} loading={healthLoading} onClick={refreshAll}>
+              刷新运维状态
             </Button>
+            <Link href="/refreshes">
+              <Button icon={<SyncOutlined />}>刷新监控</Button>
+            </Link>
             <Button icon={<DownloadOutlined />} onClick={exportAll} disabled={!snapshot}>
               导出租户清单
             </Button>
@@ -115,7 +191,7 @@ export default function OverviewPage() {
       {error && !snapshot && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && snapshot && <StaleDataAlert error={error} onRetry={() => mutate()} />}
 
-      {memberMode && (
+      {memberMode && snapshot && (
         <Alert
           type="warning"
           showIcon
@@ -123,196 +199,227 @@ export default function OverviewPage() {
           message={`成员模式：当前仅覆盖服务主体已加入的 ${snapshot.workspaces.length} 个工作区`}
           description={
             <>
-              <p style={{ margin: '4px 0' }}>
-                {snapshot.adminFallbackReason ?? '租户级 Admin API 当前不可用，已自动降级为成员模式。'}
-              </p>
-              <p style={{ margin: '4px 0' }}>
-                浏览、数据源、刷新记录和触发刷新仍可使用；报表级用户与全租户刷新状态依赖租户级 Admin API。
-              </p>
+              <div>{snapshot.adminFallbackReason ?? '租户级 Admin API 当前不可用，已自动降级为成员模式。'}</div>
+              <div style={{ marginTop: 4 }}>
+                失败巡检仍可使用；全租户运行中状态、历史耗时基线与耗时离群识别需要 Admin API。
+              </div>
             </>
           }
         />
       )}
 
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={8} xl={5}>
-          <Card className="metric-card">
-            <Statistic title="工作区" value={snapshot?.workspaces.length ?? 0} loading={isLoading} />
-            <div className="metric-hint">当前可见工作区范围</div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={8} xl={5}>
-          <Card className="metric-card">
-            <Statistic title="报表" value={snapshot?.reports.length ?? 0} loading={isLoading} />
-            <div className="metric-hint">租户内容规模</div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={8} xl={5}>
-          <Card className="metric-card">
-            <Statistic title="数据集" value={snapshot?.datasets.length ?? 0} loading={isLoading} />
-            <div className="metric-hint">可进入刷新与模型排查</div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={12} xl={5}>
-          <Card className="metric-card">
-            <Statistic title="工作区成员（去重）" value={memberCount} loading={isLoading} />
-            <div className="metric-hint">按成员标识去重统计</div>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={12} xl={4}>
+        <Col xs={12} lg={6}>
           <Card className="metric-card">
             <Statistic
-              title="刷新异常"
-              value={failures.length}
-              loading={failuresValidating && !failuresData}
-              valueStyle={failures.length > 0 ? { color: '#cf1322' } : { color: '#389e0d' }}
-              prefix={failures.length > 0 ? <WarningOutlined /> : <CheckCircleOutlined />}
+              title="需处理工作区"
+              value={health.affectedWorkspaceCount}
+              loading={isLoading}
+              prefix={health.affectedWorkspaceCount > 0 ? <WarningOutlined /> : <CheckCircleOutlined />}
+              valueStyle={health.affectedWorkspaceCount > 0 ? { color: '#cf1322' } : { color: '#389e0d' }}
             />
-            <div className="metric-hint">最近一次刷新失败的数据集</div>
+            <div className="metric-hint">存在刷新失败或耗时离群</div>
+          </Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card className="metric-card">
+            <Statistic
+              title="刷新失败"
+              value={health.failedCount}
+              loading={failuresValidating && !failuresData}
+              valueStyle={health.failedCount > 0 ? { color: '#cf1322' } : undefined}
+            />
+            <div className="metric-hint">最近一次刷新明确失败</div>
+          </Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card className="metric-card">
+            <Statistic
+              title="耗时离群"
+              value={memberMode ? '-' : health.durationOutlierCount}
+              loading={!memberMode && refreshablesValidating && !refreshablesData}
+              valueStyle={health.durationOutlierCount > 0 ? { color: '#d46b08' } : undefined}
+            />
+            <div className="metric-hint">相对自身历史基线的统计离群</div>
+          </Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card className="metric-card">
+            <Statistic
+              title="运行中 / 排队"
+              value={memberMode ? '-' : health.activeCount}
+              loading={!memberMode && refreshablesValidating && !refreshablesData}
+              prefix={!memberMode && health.activeCount > 0 ? <SyncOutlined spin /> : undefined}
+            />
+            <div className="metric-hint">当前正在执行或等待执行</div>
           </Card>
         </Col>
       </Row>
 
+      {!memberMode && health.durationModel.sampleSize > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 16 }}
+          message="耗时异常采用自适应统计规则"
+          description={`当前有 ${health.durationModel.sampleSize} 个刷新项具备可比较的历史耗时基线。系统先计算“本次耗时 ÷ 自身历史中位数（无中位数时用均值）”，再用全租户比值分布的 Modified Z-Score > 3.5 标记离群，不使用固定的分钟阈值。`}
+        />
+      )}
+
+      {(failuresError || refreshablesError) && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 16 }}
+          message="部分运维健康数据暂不可用"
+          description={
+            failuresError
+              ? `刷新失败巡检：${failuresError instanceof Error ? failuresError.message : String(failuresError)}`
+              : `全租户刷新状态：${refreshablesError instanceof Error ? refreshablesError.message : String(refreshablesError)}`
+          }
+        />
+      )}
+
       <Card
         className="section-card"
-        title="刷新健康"
+        title="待处理事项"
         style={{ marginTop: 16 }}
         extra={
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            {failures.length > 0 ? <Tag color="red">需关注 {failures.length}</Tag> : <Tag color="green">当前正常</Tag>}
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              loading={failuresValidating}
-              onClick={() => mutateFailures(() => fetcher('/api/refresh-failures?force=1'))}
-            >
-              重新巡检
+          <Space wrap>
+            <Tag color={health.actionableItems.length > 0 ? 'red' : 'green'}>
+              {health.actionableItems.length > 0 ? `待处理 ${health.actionableItems.length}` : '当前无明确异常'}
+            </Tag>
+            <Button size="small" icon={<DownloadOutlined />} disabled={health.actionableItems.length === 0} onClick={exportIssues}>
+              导出待处理
             </Button>
-            <Button
-              size="small"
-              icon={<DownloadOutlined />}
-              disabled={failures.length === 0}
-              onClick={() =>
-                exportCSV(
-                  `刷新失败巡检_${new Date().toISOString().slice(0, 10)}.csv`,
-                  ['数据集', '工作区', '失败时间', '刷新类型', '错误信息'],
-                  failures.map((f) => [
-                    f.datasetName,
-                    f.workspaceName,
-                    dayjs(f.startTime).format('YYYY-MM-DD HH:mm:ss'),
-                    f.refreshType ?? '',
-                    f.error ?? '',
-                  ]),
-                )
-              }
-            >
-              导出异常
-            </Button>
-          </div>
+          </Space>
         }
       >
-        {failuresError && <ErrorAlert error={failuresError} onRetry={() => mutateFailures()} />}
-        {!failuresError && failures.length === 0 && !failuresValidating && (
-          <Alert
-            type="success"
-            showIcon
-            message="最近一次刷新巡检未发现失败数据集"
-            description="这里检查的是各可刷新数据集最近一次刷新结果，不代表后续刷新不会出现异常。"
-            style={{ marginBottom: 12 }}
-          />
-        )}
-        <Table
-          rowKey="datasetId"
+        <Table<RefreshHealthItem>
+          rowKey="key"
           size="small"
-          loading={failuresValidating && !failuresData}
-          dataSource={failures}
-          scroll={{ x: 800 }}
-          locale={{ emptyText: <TableEmpty title="暂无刷新异常" description="最近一次刷新失败的数据集会出现在这里。" /> }}
-          pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 个异常` }}
+          loading={healthLoading && health.actionableItems.length === 0}
+          dataSource={health.actionableItems}
+          scroll={{ x: 980 }}
+          locale={{
+            emptyText: (
+              <TableEmpty
+                title="当前没有明确待处理事项"
+                description={memberMode ? '成员模式下会列出可访问数据集的最近刷新失败。' : '刷新失败或耗时统计离群会出现在这里。'}
+              />
+            ),
+          }}
+          pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 项` }}
           columns={[
-            { title: '数据集', dataIndex: 'datasetName', ellipsis: true },
-            { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true },
             {
-              title: '失败时间',
+              title: '问题',
+              width: 95,
+              render: (_: unknown, item) =>
+                item.status === 'Failed' ? <Tag color="red">刷新失败</Tag> : <Tag color="orange">耗时离群</Tag>,
+            },
+            { title: '数据集 / 刷新项', dataIndex: 'name', ellipsis: true },
+            { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true, render: (value?: string) => value ?? '-' },
+            {
+              title: '最近时间',
               dataIndex: 'startTime',
               width: 160,
-              render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss'),
+              render: (value?: string) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-'),
             },
-            { title: '类型', dataIndex: 'refreshType', width: 100 },
             {
-              title: '错误信息',
+              title: '本次 / 历史基线',
+              width: 155,
+              render: (_: unknown, item) =>
+                item.durationSeconds !== undefined && item.baselineSeconds !== undefined
+                  ? `${formatDuration(item.durationSeconds)} / ${formatDuration(item.baselineSeconds)}`
+                  : '-',
+            },
+            {
+              title: '耗时倍数',
+              dataIndex: 'durationRatio',
+              width: 95,
+              render: (value?: number, item?: RefreshHealthItem) =>
+                value ? (
+                  <Tooltip title={item?.modifiedZ !== undefined ? `Modified Z-Score ${item.modifiedZ.toFixed(2)}` : '历史样本不足，未计算离群分数'}>
+                    <span>{value.toFixed(2)}×</span>
+                  </Tooltip>
+                ) : '-',
+            },
+            {
+              title: '错误 / 说明',
               ellipsis: { showTitle: false },
-              render: (_: unknown, f: RefreshFailureItem) =>
-                f.error ? (
-                  <Tooltip title={f.error} placement="topLeft"><span className="text-error">{f.error}</span></Tooltip>
-                ) : <span className="text-muted">未返回错误详情</span>,
+              render: (_: unknown, item) =>
+                item.error ? (
+                  <Tooltip title={item.error} placement="topLeft"><span className="text-error">{item.error}</span></Tooltip>
+                ) : item.durationOutlier ? (
+                  <span className="text-muted">当前耗时显著偏离租户同类比值分布</span>
+                ) : '-',
+            },
+            {
+              title: '定位',
+              width: 150,
+              fixed: 'right',
+              render: (_: unknown, item) => (
+                <Space size={4}>
+                  <Link href={`/datasets?search=${encodeURIComponent(item.name)}`}>数据集</Link>
+                  {item.workspaceId && <Link href={`/workspaces/${item.workspaceId}`}>工作区</Link>}
+                </Space>
+              ),
             },
           ]}
         />
       </Card>
 
-      {!memberMode && (
-        <Card
-          className="section-card"
-          title="全租户刷新状态"
-          style={{ marginTop: 16 }}
-          extra={
-            refreshablesError ? (
-              <Tooltip title={String(refreshablesError.message ?? refreshablesError)}><Tag color="orange">状态不可用</Tag></Tooltip>
-            ) : refreshablesData ? (
-              <span className="text-muted">成功 {refreshCompleted} · 失败 {refreshFailed} · 进行中/排队 {refreshActive}</span>
-            ) : null
-          }
-        >
-          <Table
-            rowKey={(r) => `${r.itemId ?? r.id ?? r.name}`}
-            size="small"
-            dataSource={refreshables}
-            scroll={{ x: 760 }}
-            locale={{ emptyText: <TableEmpty title="暂无刷新状态" description="当前没有返回全租户可刷新项。" /> }}
-            pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 项` }}
-            columns={[
-              { title: '名称', dataIndex: 'name', ellipsis: true },
-              {
-                title: '最近状态',
-                dataIndex: ['lastRefresh', 'status'],
-                width: 100,
-                render: (v?: string) =>
-                  v === 'Completed' ? <Tag color="green">成功</Tag> :
-                    v === 'Failed' ? <Tag color="red">失败</Tag> :
-                      v === 'InProgress' ? <Tag color="blue">进行中</Tag> :
-                        v === 'NotStarted' ? <Tag color="gold">排队中</Tag> : <Tag>{v ?? '未知'}</Tag>,
+      <Card
+        className="section-card"
+        title="工作区健康"
+        style={{ marginTop: 16 }}
+        extra={<Typography.Text type="secondary">异常优先排序 · 健康状态由下属刷新项聚合</Typography.Text>}
+      >
+        <Table<WorkspaceHealthItem>
+          rowKey="workspaceId"
+          size="small"
+          loading={isLoading}
+          dataSource={health.workspaceHealth}
+          scroll={{ x: 840 }}
+          locale={{ emptyText: <TableEmpty title="暂无工作区" description="当前环境没有可显示的工作区。" /> }}
+          pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 个工作区` }}
+          columns={[
+            {
+              title: '状态',
+              dataIndex: 'state',
+              width: 90,
+              render: (state: WorkspaceHealthState) => {
+                const meta = workspaceStateMeta(state)
+                return <Tag color={meta.color}>{meta.label}</Tag>
               },
-              {
-                title: '最近刷新时间',
-                dataIndex: ['lastRefresh', 'startTime'],
-                width: 170,
-                render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : <span className="text-muted">无记录</span>),
-              },
-              { title: '刷新次数', dataIndex: 'refreshCount', width: 90, render: (v?: number) => v ?? '-' },
-              {
-                title: '错误',
-                ellipsis: { showTitle: false },
-                render: (_: unknown, r: PbiRefreshable) => {
-                  const raw = r.lastRefresh?.serviceExceptionJson
-                  if (!raw) return <span className="text-muted">-</span>
-                  let msg = raw
-                  try {
-                    msg = JSON.parse(raw).error?.message ?? raw
-                  } catch {
-                    /* 保留原文 */
-                  }
-                  return <Tooltip title={msg} placement="topLeft"><span className="text-error">{msg}</span></Tooltip>
-                },
-              },
-            ]}
-          />
-        </Card>
-      )}
-
-      {!memberMode && !refreshablesData && !refreshablesError && (
-        <Alert type="info" showIcon message="正在加载全租户刷新状态…" style={{ marginTop: 16 }} />
-      )}
+            },
+            { title: '工作区', dataIndex: 'workspaceName', ellipsis: true },
+            { title: '报表', dataIndex: 'reportCount', width: 75 },
+            { title: '数据集', dataIndex: 'datasetCount', width: 75 },
+            { title: '已监控刷新项', dataIndex: 'monitoredCount', width: 110 },
+            {
+              title: '异常构成',
+              width: 230,
+              render: (_: unknown, workspace) => (
+                <Space size={4} wrap>
+                  {workspace.failedCount > 0 && <Tag color="red">失败 {workspace.failedCount}</Tag>}
+                  {workspace.durationOutlierCount > 0 && <Tag color="orange">耗时离群 {workspace.durationOutlierCount}</Tag>}
+                  {workspace.activeCount > 0 && <Tag color="processing">运行中/排队 {workspace.activeCount}</Tag>}
+                  {workspace.failedCount === 0 && workspace.durationOutlierCount === 0 && workspace.activeCount === 0 && (
+                    <span className="text-muted">-</span>
+                  )}
+                </Space>
+              ),
+            },
+            {
+              title: '操作',
+              width: 90,
+              fixed: 'right',
+              render: (_: unknown, workspace) => <Link href={`/workspaces/${workspace.workspaceId}`}>查看</Link>,
+            },
+          ]}
+        />
+      </Card>
     </div>
   )
 }
