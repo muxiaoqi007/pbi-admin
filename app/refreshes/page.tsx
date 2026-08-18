@@ -73,7 +73,7 @@ export default function RefreshesPage() {
     revalidateOnFocus: false,
   })
 
-  const refreshables = refreshData?.refreshables ?? []
+  const refreshables = useMemo(() => refreshData?.refreshables ?? [], [refreshData])
   const datasetById = useMemo(
     () => new Map((snapshot?.datasets ?? []).map((dataset) => [dataset.id, dataset])),
     [snapshot],
