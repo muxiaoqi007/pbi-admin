@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { Alert, App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, ExportOutlined, MoreOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
@@ -49,6 +49,16 @@ export default function DatasetsPage() {
     )
   }, [data, keyword])
 
+  const selectedDatasets = useMemo(() => {
+    const ids = new Set(selected.map(String))
+    return (data?.datasets ?? []).filter((d) => ids.has(d.id) && d.isRefreshable)
+  }, [data, selected])
+
+  const selectedVisibleCount = useMemo(() => {
+    const ids = new Set(selectedDatasets.map((d) => d.id))
+    return filtered.filter((d) => ids.has(d.id)).length
+  }, [filtered, selectedDatasets])
+
   const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
     users: PbiAdminUser[]
   }>(
@@ -79,7 +89,7 @@ export default function DatasetsPage() {
   }
 
   async function runBatchRefresh() {
-    const rows = filtered.filter((d) => selected.includes(d.id))
+    const rows = selectedDatasets
     if (rows.length === 0) return
     setBatchRunning(true)
     setBatchResult(null)
@@ -89,9 +99,10 @@ export default function DatasetsPage() {
       })
       setBatchResult(res)
       if (res.failures.length === 0) {
+        setSelected([])
         message.success(`${res.success}/${res.total} 个数据集刷新请求已提交`)
       } else {
-        message.warning(`${res.success}/${res.total} 成功，${res.failures.length} 个失败，详见页面下方明细`)
+        message.warning(`${res.success}/${res.total} 成功，${res.failures.length} 个失败，详见结果明细`)
       }
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
@@ -101,11 +112,15 @@ export default function DatasetsPage() {
   }
 
   function confirmBatch() {
+    const count = selectedDatasets.length
+    if (count === 0) return
     modal.confirm({
-      title: `批量刷新 ${selected.length} 个数据集？`,
+      title: `批量刷新 ${count} 个数据集？`,
       content:
         '将依次对所选数据集触发全部刷新（并发 3 个，避免触发限流）。已有刷新排队中的数据集会被服务端拒绝，失败明细将在完成后展示。',
       okText: '开始刷新',
+      cancelText: '取消',
+      okButtonProps: { loading: batchRunning },
       onOk: runBatchRefresh,
     })
   }
@@ -113,6 +128,16 @@ export default function DatasetsPage() {
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {error && data && (
+        <Alert
+          type="warning"
+          showIcon
+          message="最新数据刷新失败，当前仍显示上一次成功加载的数据"
+          description={error instanceof Error ? error.message : String(error)}
+          action={<Button size="small" onClick={() => mutate()}>重试</Button>}
+          style={{ marginBottom: 12 }}
+        />
+      )}
       <div className="table-toolbar">
         <Input
           allowClear
@@ -124,6 +149,9 @@ export default function DatasetsPage() {
         />
         <span className="text-muted">共 {filtered.length} 个数据集</span>
         {isValidating && data && <span className="text-muted">（正在刷新…）</span>}
+        {selectedDatasets.length > 0 && selectedVisibleCount !== selectedDatasets.length && (
+          <Tag color="blue">已选 {selectedDatasets.length} 个，其中当前筛选可见 {selectedVisibleCount} 个</Tag>
+        )}
         <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
           导出 CSV
         </Button>
@@ -131,20 +159,27 @@ export default function DatasetsPage() {
           type="primary"
           ghost
           icon={<SyncOutlined />}
-          disabled={selected.length === 0}
+          disabled={selectedDatasets.length === 0}
           loading={batchRunning}
           onClick={confirmBatch}
         >
-          批量刷新{selected.length > 0 ? `（已选 ${selected.length} 个）` : ''}
+          批量刷新{selectedDatasets.length > 0 ? `（已选 ${selectedDatasets.length} 个）` : ''}
         </Button>
+        {selectedDatasets.length > 0 && (
+          <Button size="small" type="link" onClick={() => setSelected([])} disabled={batchRunning}>
+            清空选择
+          </Button>
+        )}
       </div>
       <Table<DatasetView>
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
+        scroll={{ x: 1050 }}
         rowSelection={{
           selectedRowKeys: selected,
           onChange: setSelected,
+          preserveSelectedRowKeys: true,
           getCheckboxProps: (d) => ({ disabled: !d.isRefreshable }),
         }}
         pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
@@ -179,11 +214,21 @@ export default function DatasetsPage() {
           },
           {
             title: '操作',
-            width: 170,
+            width: 190,
             fixed: 'right',
             render: (_: unknown, d) => (
               <Space size={4}>
-                <a onClick={() => setRefreshDataset(d)}>立即刷新</a>
+                <Tooltip title={d.isRefreshable ? undefined : '该数据集当前不可刷新'}>
+                  <Button
+                    type="link"
+                    size="small"
+                    disabled={!d.isRefreshable}
+                    onClick={() => setRefreshDataset(d)}
+                    style={{ paddingInline: 0 }}
+                  >
+                    立即刷新
+                  </Button>
+                </Tooltip>
                 <Dropdown
                   trigger={['click']}
                   menu={{
@@ -217,9 +262,16 @@ export default function DatasetsPage() {
           onCancel={() => setBatchResult(null)}
           title={`批量刷新结果：成功 ${batchResult.success} / ${batchResult.total}`}
         >
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
+          <Alert
+            type="warning"
+            showIcon
+            message={`${batchResult.failures.length} 个数据集未能提交刷新`}
+            description="可以根据下方错误修复后重新选择这些数据集再试。"
+            style={{ marginBottom: 12 }}
+          />
+          <ul style={{ margin: 0, paddingLeft: 18, maxHeight: 420, overflow: 'auto' }}>
             {batchResult.failures.map((f, index) => (
-              <li key={`${f.name}-${index}`} style={{ marginBottom: 4 }}>
+              <li key={`${f.name}-${index}`} style={{ marginBottom: 8 }}>
                 <Typography.Text strong>{f.name}</Typography.Text>
                 <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>
                   {f.error}
@@ -292,7 +344,9 @@ export default function DatasetsPage() {
         open={!!refreshDataset}
         dataset={refreshDataset}
         onClose={() => setRefreshDataset(null)}
-        onTriggered={() => setHistoryDataset(refreshDataset)}
+        onTriggered={() => {
+          if (refreshDataset) setHistoryDataset(refreshDataset)
+        }}
       />
     </div>
   )
