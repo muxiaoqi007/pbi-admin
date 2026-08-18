@@ -2,10 +2,11 @@
 
 import { useMemo, useState } from 'react'
 import { Button, Input, Table, Tag, Tooltip } from 'antd'
-import { DownloadOutlined, SearchOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
 import ErrorAlert from '@/components/ErrorAlert'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import { accessRightOf } from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -53,6 +54,7 @@ export default function WorkspacesPage() {
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
       <div className="table-toolbar">
         <Input
           allowClear
@@ -63,6 +65,13 @@ export default function WorkspacesPage() {
           onChange={(e) => setKeyword(e.target.value)}
         />
         <span className="text-muted">共 {filtered.length} 个工作区</span>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+        >
+          刷新列表
+        </Button>
         <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
           导出 CSV
         </Button>
@@ -71,6 +80,7 @@ export default function WorkspacesPage() {
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
+        scroll={{ x: 950 }}
         pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
         columns={[
           {
@@ -120,7 +130,6 @@ export default function WorkspacesPage() {
           },
         ]}
       />
-      {isValidating && data && <p className="text-muted">正在刷新…</p>}
     </div>
   )
 }
