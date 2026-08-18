@@ -2,11 +2,12 @@
 
 import { useMemo, useState } from 'react'
 import { Button, Drawer, Input, Modal, Space, Table, Typography } from 'antd'
-import { DownloadOutlined, ExportOutlined, SearchOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ExportOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -75,6 +76,7 @@ export default function ReportsPage() {
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
       <div className="table-toolbar">
         <Input
           allowClear
@@ -85,7 +87,13 @@ export default function ReportsPage() {
           onChange={(e) => setKeyword(e.target.value)}
         />
         <span className="text-muted">共 {filtered.length} 张报表</span>
-        {isValidating && data && <span className="text-muted">（正在刷新…）</span>}
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+        >
+          刷新列表
+        </Button>
         <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
           导出 CSV
         </Button>
@@ -94,6 +102,7 @@ export default function ReportsPage() {
         rowKey={(r) => `${r.workspaceId}:${r.id}`}
         loading={isLoading}
         dataSource={filtered}
+        scroll={{ x: 1000 }}
         pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 张`, onShowSizeChange: (_, size) => setPageSize(size) }}
         columns={[
           { title: '报表', dataIndex: 'name', ellipsis: true },
@@ -119,7 +128,11 @@ export default function ReportsPage() {
               <Space size={10}>
                 <a onClick={() => setUsersReport(r)}>用户</a>
                 <a onClick={() => setPagesReport(r)}>页面</a>
-                <a onClick={() => setDatasourceReport(r)}>数据源</a>
+                {r.datasetId ? (
+                  <a onClick={() => setDatasourceReport(r)}>数据源</a>
+                ) : (
+                  <Typography.Text type="secondary">数据源</Typography.Text>
+                )}
                 {r.webUrl && (
                   <Typography.Link href={r.webUrl} target="_blank">
                     <Space size={2}>
