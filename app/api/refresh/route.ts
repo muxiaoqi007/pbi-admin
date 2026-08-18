@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { fail } from '@/lib/api'
-import { triggerRefresh, type RefreshRequest } from '@/lib/pbi'
+import { triggerRefresh, type RefreshRequest } from '@/lib/refresh'
 import { REFRESH_TYPES } from '@/lib/types'
 import { isPlainObject, isSafeId } from '@/lib/validation'
 
