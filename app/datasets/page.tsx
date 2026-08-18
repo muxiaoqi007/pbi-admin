@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Alert, App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, ExportOutlined, MoreOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
@@ -37,6 +37,11 @@ export default function DatasetsPage() {
   const [selected, setSelected] = useState<React.Key[]>([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
+
+  useEffect(() => {
+    const search = new URLSearchParams(window.location.search).get('search')
+    if (search) setKeyword(search)
+  }, [])
 
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
