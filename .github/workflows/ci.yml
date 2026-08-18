@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  verify:
+  verify-current:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,7 +15,30 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+
+  next16-security-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Next 16.3.0 candidate
+        run: npm install next@16.3.0 --save-exact
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: next16-package-manifest
+          path: |
+            package.json
+            package-lock.json
+          if-no-files-found: error
