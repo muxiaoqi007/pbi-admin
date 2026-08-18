@@ -57,8 +57,10 @@ export async function proxy(req: NextRequest) {
     return NextResponse.json({ error: '未登录或会话已过期，请刷新页面重新登录' }, { status: 401 })
   }
   const url = req.nextUrl.clone()
+  const returnPath = `${req.nextUrl.pathname}${req.nextUrl.search}`
   url.pathname = '/login'
   url.search = ''
+  url.searchParams.set('next', returnPath)
   return NextResponse.redirect(url)
 }
 

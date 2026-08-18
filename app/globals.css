@@ -29,3 +29,40 @@ body {
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+
+.settings-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.settings-env-list {
+  width: 320px;
+  flex: 0 0 320px;
+}
+
+.settings-editor {
+  flex: 1;
+  min-width: 480px;
+}
+
+@media (max-width: 900px) {
+  .page-content {
+    padding: 12px;
+  }
+
+  .header-subtitle {
+    display: none;
+  }
+
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-env-list,
+  .settings-editor {
+    width: 100%;
+    min-width: 0;
+    flex-basis: auto;
+  }
+}

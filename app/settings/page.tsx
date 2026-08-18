@@ -91,15 +91,16 @@ interface FormValues {
 }
 
 export default function SettingsPage() {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [form] = Form.useForm<FormValues>()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [dirty, setDirty] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
 
-  const { data, mutate } = useSWR<ConfigResponse>('/api/config', fetcher)
+  const { data, mutate, error: configError, isLoading } = useSWR<ConfigResponse>('/api/config', fetcher)
   const environments = data?.environments ?? []
   const activeEnvId = data?.activeEnvId
 
@@ -108,6 +109,10 @@ export default function SettingsPage() {
   const cloud = Form.useWatch('cloud', form) ?? selectedEnv?.cloud ?? 'global'
   const preset = CLOUD_PRESETS[cloud as CloudEnv] ?? CLOUD_PRESETS.global
   const authType = Form.useWatch('authType', form) ?? selectedEnv?.authType ?? 'servicePrincipal'
+
+  useEffect(() => {
+    if (!selectedId && data?.activeEnvId) setSelectedId(data.activeEnvId)
+  }, [data?.activeEnvId, selectedId])
 
   useEffect(() => {
     if (selectedId && data) {
@@ -143,27 +148,60 @@ export default function SettingsPage() {
           })
         }
       }
+      setDirty(false)
       setTestResult(null)
       setTestError(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, data])
 
-  async function persist(thenTest: boolean) {
-    const values = await form.validateFields()
-    if (!thenTest && isNew && !values.clientSecret && !testResult) {
-      // 新建环境必须提供密钥
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
     }
-    setSaving(true)
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+
+  function chooseEnvironment(nextId: string) {
+    if (nextId === selectedId) return
+    if (!dirty) {
+      setSelectedId(nextId)
+      return
+    }
+    modal.confirm({
+      title: '放弃未保存的更改？',
+      content: '当前环境配置已经修改但尚未保存。切换后这些修改会丢失。',
+      okText: '放弃并切换',
+      cancelText: '继续编辑',
+      okButtonProps: { danger: true },
+      onOk: () => setSelectedId(nextId),
+    })
+  }
+
+  async function persist(thenTest: boolean) {
+    let values: FormValues
     try {
-      await postJSON('/api/config', {
+      values = await form.validateFields()
+    } catch {
+      return
+    }
+
+    setSaving(true)
+    setTestResult(null)
+    setTestError(null)
+    try {
+      const saved = await postJSON<ConfigResponse & { ok: boolean }>('/api/config', {
         action: 'save',
         env: { ...values, id: isNew ? undefined : selectedId },
       })
-      await mutate()
+      await mutate(saved, { revalidate: false })
+      setSelectedId(saved.activeEnvId ?? selectedId)
+      setDirty(false)
       message.success('环境已保存并设为当前使用')
-      setTestResult(null)
-      setTestError(null)
+
       if (thenTest) {
         setTesting(true)
         try {
@@ -184,8 +222,8 @@ export default function SettingsPage() {
 
   async function activate(id: string) {
     try {
-      await postJSON('/api/config', { action: 'activate', id })
-      await mutate()
+      const next = await postJSON<ConfigResponse & { ok: boolean }>('/api/config', { action: 'activate', id })
+      await mutate(next, { revalidate: false })
       message.success('已切换当前环境')
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
@@ -194,9 +232,12 @@ export default function SettingsPage() {
 
   async function remove(id: string) {
     try {
-      await postJSON('/api/config', { action: 'delete', id })
-      await mutate()
-      if (selectedId === id) setSelectedId(null)
+      const next = await postJSON<ConfigResponse & { ok: boolean }>('/api/config', { action: 'delete', id })
+      await mutate(next, { revalidate: false })
+      if (selectedId === id) {
+        setDirty(false)
+        setSelectedId(next.activeEnvId ?? null)
+      }
       message.success('环境已删除')
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
@@ -204,21 +245,31 @@ export default function SettingsPage() {
   }
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+    <div className="settings-layout">
       <Card
         title="租户环境"
-        style={{ width: 320 }}
+        className="settings-env-list"
+        loading={isLoading && !data}
         extra={
           <Button
             size="small"
             icon={<PlusOutlined />}
-            onClick={() => setSelectedId('new')}
+            onClick={() => chooseEnvironment('new')}
             type={isNew ? 'primary' : 'default'}
           >
             新建
           </Button>
         }
       >
+        {configError && (
+          <Alert
+            type="error"
+            showIcon
+            message="环境配置加载失败"
+            description={configError instanceof Error ? configError.message : String(configError)}
+            style={{ marginBottom: 12 }}
+          />
+        )}
         <List
           dataSource={environments}
           locale={{ emptyText: '暂无环境，点右上角新建' }}
@@ -232,13 +283,13 @@ export default function SettingsPage() {
                 border:
                   selectedId === env.id ? '1px solid #e8ad03' : '1px solid transparent',
               }}
-              onClick={() => setSelectedId(env.id)}
+              onClick={() => chooseEnvironment(env.id)}
               actions={[
                 <Button
                   key="use"
                   size="small"
                   type="link"
-                  disabled={env.id === activeEnvId}
+                  disabled={env.id === activeEnvId || saving || testing}
                   onClick={(e) => {
                     e.stopPropagation()
                     activate(env.id)
@@ -248,7 +299,11 @@ export default function SettingsPage() {
                 </Button>,
                 <Popconfirm
                   key="del"
-                  title="确认删除该环境？"
+                  title={env.id === selectedId && dirty ? '该环境有未保存更改，确认删除？' : '确认删除该环境？'}
+                  description="删除后无法从页面恢复该环境配置。"
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
                   onConfirm={(e) => {
                     e?.stopPropagation()
                     remove(env.id)
@@ -259,6 +314,7 @@ export default function SettingsPage() {
                     size="small"
                     type="text"
                     danger
+                    disabled={saving || testing}
                     onClick={(e) => e.stopPropagation()}
                   >
                     删除
@@ -290,7 +346,8 @@ export default function SettingsPage() {
 
       <Card
         title={isNew ? '新建环境' : selectedEnv ? `编辑：${selectedEnv.name}` : '选择或新建一个环境'}
-        style={{ flex: 1, minWidth: 480 }}
+        className="settings-editor"
+        extra={dirty ? <Tag color="orange">有未保存更改</Tag> : null}
       >
         {!selectedId && (
           <Alert
@@ -301,7 +358,7 @@ export default function SettingsPage() {
           />
         )}
         {selectedId && (
-          <Form form={form} layout="vertical">
+          <Form form={form} layout="vertical" onValuesChange={() => setDirty(true)} disabled={saving || testing}>
             <Form.Item name="name" label="环境名称" rules={[{ required: true, message: '请填写名称' }]}>
               <Input placeholder="如：世纪互联生产 / 客户A国际版" />
             </Form.Item>
@@ -338,14 +395,17 @@ export default function SettingsPage() {
                   label="用户名（UPN 邮箱）"
                   rules={[{ required: true, message: '请填写用户名' }]}
                 >
-                  <Input placeholder="admin@xxx.partner.onmschina.cn" />
+                  <Input placeholder="admin@xxx.partner.onmschina.cn" autoComplete="username" />
                 </Form.Item>
                 <Form.Item
                   name="password"
                   label={`密码${selectedEnv?.hasPassword ? `（${selectedEnv.passwordPreview}，留空不改）` : ''}`}
                   rules={[{ required: !selectedEnv?.hasPassword, message: '请填写密码' }]}
                 >
-                  <Input.Password placeholder={selectedEnv?.hasPassword ? '留空保持不变' : '账号密码'} />
+                  <Input.Password
+                    placeholder={selectedEnv?.hasPassword ? '留空保持不变' : '账号密码'}
+                    autoComplete="new-password"
+                  />
                 </Form.Item>
               </>
             ) : (
@@ -356,6 +416,7 @@ export default function SettingsPage() {
               >
                 <Input.Password
                   placeholder={selectedEnv?.hasSecret ? '留空保持不变' : '应用注册中创建的密钥值'}
+                  autoComplete="new-password"
                 />
               </Form.Item>
             )}
@@ -381,12 +442,12 @@ export default function SettingsPage() {
                 },
               ]}
             />
-            <Space style={{ marginTop: 8 }}>
-              <Button type="primary" loading={saving} onClick={() => persist(false)}>
+            <Space style={{ marginTop: 8 }} wrap>
+              <Button type="primary" loading={saving && !testing} onClick={() => persist(false)}>
                 保存并使用
               </Button>
               <Button loading={saving || testing} onClick={() => persist(true)}>
-                保存并测试连接
+                {testing ? '正在测试连接…' : '保存并测试连接'}
               </Button>
             </Space>
             <p style={{ marginTop: 8 }} className="text-muted">
