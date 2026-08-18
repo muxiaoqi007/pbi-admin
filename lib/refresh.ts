@@ -2,6 +2,7 @@ import { getAccessToken } from './auth'
 import { resolveRuntime } from './config'
 import { PbiError } from './pbi'
 import type { RefreshType } from './types'
+import { isTrustedPbiRequestUrl } from './validation'
 
 export interface RefreshRequest {
   workspaceId: string
@@ -53,6 +54,9 @@ async function requestRefresh(req: RefreshRequest, forceToken = false): Promise<
   const token = await getAccessToken(forceToken)
   const path = `/groups/${req.workspaceId}/datasets/${req.datasetId}/refreshes`
   let url = `${runtime.apiBase}${path}`
+  if (!isTrustedPbiRequestUrl(url)) {
+    throw new PbiError(400, '拒绝向非 Power BI/Microsoft 域名发送访问令牌', 'UNTRUSTED_PBI_URL')
+  }
   let response: Response
 
   for (let hop = 0; ; hop++) {
@@ -68,7 +72,15 @@ async function requestRefresh(req: RefreshRequest, forceToken = false): Promise<
     })
     const location = response.headers.get('location')
     if ([301, 302, 303, 307, 308].includes(response.status) && location && hop < 5) {
-      url = new URL(location, url).toString()
+      const nextUrl = new URL(location, url).toString()
+      if (!isTrustedPbiRequestUrl(nextUrl)) {
+        throw new PbiError(
+          502,
+          'Power BI 返回了不受信任的重定向地址，已拒绝转发访问令牌',
+          'UNTRUSTED_PBI_REDIRECT',
+        )
+      }
+      url = nextUrl
       continue
     }
     break
