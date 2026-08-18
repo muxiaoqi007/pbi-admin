@@ -61,7 +61,7 @@ function decodeTokenDiagnostics(token: string): AccessTokenDiagnostics {
 /**
  * 获取访问令牌。根据环境配置的 authType 自动选择：
  * - servicePrincipal: client_credentials 流程（v2 端点 + scope）
- * - password: ROPC 资源所有者密码流程（v2 端点 + username/password + scope）
+ * - password: ROPC 公共客户端流程（v2 端点 + username/password + scope）
  * force=true 时强制刷新（配置变更或收到 401/403 时使用）。
  */
 export async function getAccessToken(force = false): Promise<string> {
@@ -97,9 +97,9 @@ export async function getAccessToken(force = false): Promise<string> {
     params.grant_type = 'password'
     params.username = cfg.username!
     params.password = cfg.password!
-    // ROPC 走公共客户端流程，不带 client_secret
-    // scope 用具体的委托权限而非 .default
-    params.scope = 'offline_access https://analysis.windows.net/powerbi/api/.default'
+    // ROPC 仅按公共客户端使用，不发送 client_secret。
+    // resource 来自当前云环境，因此 Global / 21Vianet 会自动使用各自的 Power BI scope。
+    params.scope = `offline_access ${scope}`
   } else {
     params.grant_type = 'client_credentials'
     params.client_secret = cfg.clientSecret
