@@ -6,6 +6,7 @@ import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/ic
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
 import { DATASOURCE_TYPE_LABELS, type DatasourceIndex, type DatasourceIndexItem } from '@/lib/types'
@@ -67,6 +68,13 @@ export default function DatasourcesPage() {
   return (
     <div>
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {error && data && (
+        <StaleDataAlert
+          error={error}
+          onRetry={() => mutate()}
+          message="最新数据源扫描失败，当前仍显示上一次成功扫描的数据"
+        />
+      )}
       <Alert
         type="info"
         showIcon
@@ -97,7 +105,6 @@ export default function DatasourcesPage() {
           options={typeOptions}
         />
         <span className="text-muted">共 {filtered.length} 个数据源</span>
-        {isValidating && data && <span className="text-muted">（正在扫描…）</span>}
         <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
           导出 CSV
         </Button>
@@ -113,6 +120,7 @@ export default function DatasourcesPage() {
         rowKey="key"
         loading={isLoading}
         dataSource={filtered}
+        scroll={{ x: 900 }}
         pagination={{
           pageSize,
           showSizeChanger: true,
