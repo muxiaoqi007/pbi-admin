@@ -5,6 +5,7 @@ import { DownloadOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/i
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import StaleDataAlert from '@/components/StaleDataAlert'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
 import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
@@ -38,9 +39,7 @@ export default function OverviewPage() {
   function exportAll() {
     if (!snapshot) return
     const date = new Date().toISOString().slice(0, 10)
-    // Sheet 1: 数据集
     exportCSV(`数据集清单_${date}.csv`, ['数据集', '工作区', '可刷新', '需要网关', '关联报表数', '配置者', '修改时间', 'ID'], snapshot.datasets.map((d) => [d.name, d.workspaceName, d.isRefreshable ? '是' : '否', d.isOnPremGatewayRequired ? '是' : '否', d.reportCount, d.configuredBy ?? '', d.modifiedDate ? dayjs(d.modifiedDate).format('YYYY-MM-DD HH:mm') : '', d.id]))
-    // Sheet 2: 报表（延迟一下避免浏览器同时下载两个文件被拦）
     setTimeout(() => {
       exportCSV(`报表清单_${date}.csv`, ['报表', '工作区', '数据集ID', '类型', '修改时间', '链接'], snapshot.reports.map((r) => [r.name, r.workspaceName, r.datasetId ?? '', r.reportType ?? '', r.modifiedDateTime ? dayjs(r.modifiedDateTime).format('YYYY-MM-DD HH:mm') : '', r.webUrl ?? '']))
     }, 500)
@@ -56,6 +55,7 @@ export default function OverviewPage() {
   return (
     <div>
       {error && !snapshot && <ErrorAlert error={error} onRetry={() => mutate()} />}
+      {error && snapshot && <StaleDataAlert error={error} onRetry={() => mutate()} />}
       {memberMode && (
         <Alert
           type="warning"
@@ -94,28 +94,28 @@ export default function OverviewPage() {
         </Button>
       </div>
 
-      <Row gutter={16}>
-        <Col span={5}>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} lg={8} xl={5}>
           <Card>
             <Statistic title="工作区" value={snapshot?.workspaces.length ?? 0} loading={isLoading} />
           </Card>
         </Col>
-        <Col span={5}>
+        <Col xs={24} sm={12} lg={8} xl={5}>
           <Card>
             <Statistic title="报表" value={snapshot?.reports.length ?? 0} loading={isLoading} />
           </Card>
         </Col>
-        <Col span={5}>
+        <Col xs={24} sm={12} lg={8} xl={5}>
           <Card>
             <Statistic title="数据集" value={snapshot?.datasets.length ?? 0} loading={isLoading} />
           </Card>
         </Col>
-        <Col span={5}>
+        <Col xs={24} sm={12} lg={12} xl={5}>
           <Card>
             <Statistic title="工作区成员（去重）" value={memberCount} loading={isLoading} />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col xs={24} sm={12} lg={12} xl={4}>
           <Card>
             <Statistic
               title="最近刷新失败"
@@ -132,7 +132,7 @@ export default function OverviewPage() {
         title={`刷新失败巡检（${failures.length} 个数据集最近一次刷新失败）`}
         style={{ marginTop: 16 }}
         extra={
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -164,7 +164,7 @@ export default function OverviewPage() {
           </div>
         }
       >
-        {failuresError && <ErrorAlert error={failuresError} />}
+        {failuresError && <ErrorAlert error={failuresError} onRetry={() => mutateFailures()} />}
         {!failuresError && failures.length === 0 && !failuresValidating && (
           <Alert type="success" showIcon message="巡检完成：所有可刷新数据集的最近一次刷新均成功。" />
         )}
@@ -173,6 +173,7 @@ export default function OverviewPage() {
           size="small"
           loading={failuresValidating && !failuresData}
           dataSource={failures}
+          scroll={{ x: 800 }}
           pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 个` }}
           columns={[
             { title: '数据集', dataIndex: 'datasetName', ellipsis: true },
@@ -201,71 +202,72 @@ export default function OverviewPage() {
       </Card>
 
       {!memberMode && (
-      <Card
-        title="最近刷新状态（全租户可刷新项）"
-        style={{ marginTop: 16 }}
-        extra={
-          refreshablesError ? (
-            <Tooltip title={String(refreshablesError.message ?? refreshablesError)}>
-              <Tag color="orange">不可用</Tag>
-            </Tooltip>
-          ) : null
-        }
-      >
-        <Table
-          rowKey={(r) => `${r.itemId ?? r.id ?? r.name}`}
-          size="small"
-          dataSource={refreshablesData?.refreshables ?? []}
-          pagination={{ pageSize: 10 }}
-          columns={[
-            { title: '名称', dataIndex: 'name', ellipsis: true },
-            {
-              title: '最近状态',
-              dataIndex: ['lastRefresh', 'status'],
-              width: 90,
-              render: (v?: string) =>
-                v === 'Completed' ? (
-                  <Tag color="green">成功</Tag>
-                ) : v === 'Failed' ? (
-                  <Tag color="red">失败</Tag>
-                ) : (
-                  <Tag>{v ?? '-'}</Tag>
-                ),
-            },
-            {
-              title: '最近刷新时间',
-              dataIndex: ['lastRefresh', 'startTime'],
-              width: 170,
-              render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
-            },
-            {
-              title: '刷新次数',
-              dataIndex: 'refreshCount',
-              width: 90,
-              render: (v?: number) => v ?? '-',
-            },
-            {
-              title: '错误',
-              ellipsis: { showTitle: false },
-              render: (_: unknown, r: PbiRefreshable) => {
-                const raw = r.lastRefresh?.serviceExceptionJson
-                if (!raw) return '-'
-                let msg = raw
-                try {
-                  msg = JSON.parse(raw).error?.message ?? raw
-                } catch {
-                  /* 保留原文 */
-                }
-                return (
-                  <Tooltip title={msg} placement="topLeft">
-                    <span className="text-error">{msg}</span>
-                  </Tooltip>
-                )
+        <Card
+          title="最近刷新状态（全租户可刷新项）"
+          style={{ marginTop: 16 }}
+          extra={
+            refreshablesError ? (
+              <Tooltip title={String(refreshablesError.message ?? refreshablesError)}>
+                <Tag color="orange">不可用</Tag>
+              </Tooltip>
+            ) : null
+          }
+        >
+          <Table
+            rowKey={(r) => `${r.itemId ?? r.id ?? r.name}`}
+            size="small"
+            dataSource={refreshablesData?.refreshables ?? []}
+            scroll={{ x: 760 }}
+            pagination={{ pageSize: 10 }}
+            columns={[
+              { title: '名称', dataIndex: 'name', ellipsis: true },
+              {
+                title: '最近状态',
+                dataIndex: ['lastRefresh', 'status'],
+                width: 90,
+                render: (v?: string) =>
+                  v === 'Completed' ? (
+                    <Tag color="green">成功</Tag>
+                  ) : v === 'Failed' ? (
+                    <Tag color="red">失败</Tag>
+                  ) : (
+                    <Tag>{v ?? '-'}</Tag>
+                  ),
               },
-            },
-          ]}
-        />
-      </Card>
+              {
+                title: '最近刷新时间',
+                dataIndex: ['lastRefresh', 'startTime'],
+                width: 170,
+                render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-'),
+              },
+              {
+                title: '刷新次数',
+                dataIndex: 'refreshCount',
+                width: 90,
+                render: (v?: number) => v ?? '-',
+              },
+              {
+                title: '错误',
+                ellipsis: { showTitle: false },
+                render: (_: unknown, r: PbiRefreshable) => {
+                  const raw = r.lastRefresh?.serviceExceptionJson
+                  if (!raw) return '-'
+                  let msg = raw
+                  try {
+                    msg = JSON.parse(raw).error?.message ?? raw
+                  } catch {
+                    /* 保留原文 */
+                  }
+                  return (
+                    <Tooltip title={msg} placement="topLeft">
+                      <span className="text-error">{msg}</span>
+                    </Tooltip>
+                  )
+                },
+              },
+            ]}
+          />
+        </Card>
       )}
 
       {!memberMode && !refreshablesData && !refreshablesError && (
