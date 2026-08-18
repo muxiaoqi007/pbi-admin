@@ -42,7 +42,7 @@ function endpointCandidates(runtime: Awaited<ReturnType<typeof resolveRuntime>>,
   const configured = runtime.xmlaEndpointOverride?.replace(/\/+$/, '')
   const base = endpoint(runtime, name)
   return Array.from(new Set([
-    configured ? configured.replace(/\\{workspace\\}/gi, encodeURIComponent(name)) : '',
+    configured ? configured.replace(/\{workspace\}/gi, encodeURIComponent(name)) : '',
     base,
     base + '/xmla',
   ].filter(Boolean)))
