@@ -5,10 +5,13 @@ import Link from 'next/link'
 import { useState } from 'react'
 import {
   App as AntApp,
+  Button,
   ConfigProvider,
   Layout,
   Menu,
   Select,
+  Tag,
+  Tooltip,
   theme,
 } from 'antd'
 import {
@@ -43,6 +46,8 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
+  const [switchingEnvId, setSwitchingEnvId] = useState<string | null>(null)
+  const [switchEnvError, setSwitchEnvError] = useState<string | null>(null)
 
   const { data: configData } = useSWR<{
     activeEnvId?: string
@@ -52,12 +57,15 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   const activeEnvId = configData?.activeEnvId
 
   async function switchEnv(id: string) {
-    if (id === activeEnvId) return
+    if (id === activeEnvId || switchingEnvId) return
+    setSwitchingEnvId(id)
+    setSwitchEnvError(null)
     try {
       await postJSON('/api/config', { action: 'activate', id })
       window.location.reload()
-    } catch {
-      /* 切换失败时静默 */
+    } catch (error) {
+      setSwitchEnvError(error instanceof Error ? error.message : String(error))
+      setSwitchingEnvId(null)
     }
   }
 
@@ -85,26 +93,45 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
               paddingInline: 16,
             }}
           >
-            <Link href="/" style={{ color: '#fff', fontSize: 17, fontWeight: 600 }}>
+            <Link href="/" style={{ color: '#fff', fontSize: 17, fontWeight: 600, whiteSpace: 'nowrap' }}>
               Power BI 管理运维平台
             </Link>
-            <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12 }}>
+            <span className="header-subtitle" style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12 }}>
               国际版 / 世纪互联
             </span>
             <div style={{ flex: 1 }} />
-            {envs.length > 1 && (
+            {switchEnvError && (
+              <Tooltip title={switchEnvError}>
+                <Tag
+                  color="error"
+                  closable
+                  onClose={() => setSwitchEnvError(null)}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  环境切换失败
+                </Tag>
+              </Tooltip>
+            )}
+            {envs.length > 0 ? (
               <Select
+                aria-label="当前 Power BI 环境"
                 size="small"
                 value={activeEnvId}
                 onChange={switchEnv}
-                style={{ width: 200 }}
+                loading={Boolean(switchingEnvId)}
+                disabled={Boolean(switchingEnvId)}
+                style={{ width: 220 }}
                 popupMatchSelectWidth={false}
                 options={envs.map((e) => ({
                   value: e.id,
                   label: `${e.name}（${e.cloud === 'china' ? '世纪互联' : '国际版'}）`,
                 }))}
               />
-            )}
+            ) : pathname !== '/settings' && configData ? (
+              <Link href="/settings">
+                <Button size="small">配置环境</Button>
+              </Link>
+            ) : null}
           </Header>
           <Layout>
             <Sider
