@@ -1,23 +1,14 @@
 'use client'
 
-function redirectExpiredSession(res: Response) {
-  if (res.status !== 401 || window.location.pathname === '/login') return
-  const next = `${window.location.pathname}${window.location.search}${window.location.hash}`
-  const loginUrl = `/login?next=${encodeURIComponent(next)}`
-  window.location.assign(loginUrl)
-}
-
 async function readJSON(res: Response): Promise<Record<string, unknown>> {
   return (await res.json().catch(() => ({}))) as Record<string, unknown>
 }
 
 function responseError(res: Response, data: Record<string, unknown>) {
-  redirectExpiredSession(res)
-  if (res.status === 401) return new Error('会话已过期，正在跳转到登录页…')
   return new Error(typeof data.error === 'string' ? data.error : `请求失败 (HTTP ${res.status})`)
 }
 
-/** SWR fetcher：非 2xx 时抛出后端返回的 error 信息，并在会话失效时自动回登录页。 */
+/** SWR fetcher：非 2xx 时抛出后端返回的 error 信息。 */
 export async function fetcher<T>(url: string): Promise<T> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 30_000)

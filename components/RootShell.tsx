@@ -58,12 +58,10 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false)
   const [switchingEnvId, setSwitchingEnvId] = useState<string | null>(null)
   const [switchEnvError, setSwitchEnvError] = useState<string | null>(null)
-  const isLogin = pathname === '/login'
-
   const { data: configData } = useSWR<{
     activeEnvId?: string
     environments: ShellEnvironment[]
-  }>(pathname === '/settings' || isLogin ? null : '/api/config', fetcher)
+  }>(pathname === '/settings' ? null : '/api/config', fetcher)
   const envs = configData?.environments ?? []
   const activeEnvId = configData?.activeEnvId
   const activeEnv = envs.find((env) => env.id === activeEnvId)
