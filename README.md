@@ -247,7 +247,7 @@ CREATE TABLE catalog_state (
 
 ## 技术栈
 
-Next.js 15（App Router）+ TypeScript + Ant Design 5 + SWR + better-sqlite3 + Apache Arrow。运行时统一为 Node.js 22+。
+Next.js 16.3（App Router）+ TypeScript + Ant Design 5 + SWR + better-sqlite3 + Apache Arrow。运行时统一为 Node.js 22+。
 
 ## Docker 部署
 
@@ -268,6 +268,7 @@ docker run -d -p 3000:3000 \
 
 ```bash
 npm ci
+npm audit --omit=dev --audit-level=high
 npm run typecheck
 npm run lint
 npm run build
