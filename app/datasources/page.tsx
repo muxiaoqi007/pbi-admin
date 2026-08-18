@@ -6,12 +6,13 @@ import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/ic
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
+import TableEmpty from '@/components/TableEmpty'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
 import { DATASOURCE_TYPE_LABELS, type DatasourceIndex, type DatasourceIndexItem } from '@/lib/types'
 
-/** 数据源视角：按「类型 + 服务器/路径/网址 + 数据库」聚合并反查所有关联数据集（影响分析） */
 export default function DatasourcesPage() {
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<string | undefined>()
@@ -25,9 +26,7 @@ export default function DatasourcesPage() {
 
   const typeOptions = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const item of data?.items ?? []) {
-      counts.set(item.type, (counts.get(item.type) ?? 0) + 1)
-    }
+    for (const item of data?.items ?? []) counts.set(item.type, (counts.get(item.type) ?? 0) + 1)
     return Array.from(counts.entries()).map(([t, n]) => ({
       value: t,
       label: `${DATASOURCE_TYPE_LABELS[t] ?? t}（${n}）`,
@@ -67,6 +66,26 @@ export default function DatasourcesPage() {
 
   return (
     <div>
+      <PageHeader
+        title="数据源"
+        description="从连接端点反查所有关联数据集，用于改密码、迁移、网关故障与连接变更前的影响分析。"
+        meta={data ? `最近扫描：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')} · 缓存 10 分钟` : undefined}
+        actions={
+          <>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={isValidating}
+              onClick={() => mutate(() => fetcher('/api/datasources?force=1'))}
+            >
+              强制重扫
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+              导出 CSV
+            </Button>
+          </>
+        }
+      />
+
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && data && (
         <StaleDataAlert
@@ -75,52 +94,50 @@ export default function DatasourcesPage() {
           message="最新数据源扫描失败，当前仍显示上一次成功扫描的数据"
         />
       )}
+
       <Alert
         type="info"
         showIcon
-        style={{ marginBottom: 12 }}
-        message="数据源视角：按「类型 + 服务器/路径/网址 + 数据库」聚合并反查所有使用该数据源的数据集"
-        description={
-          <span className="text-muted">
-            用于数据源迁移/改密码/故障时的影响分析。结果缓存 10 分钟。首次扫描需逐个查询数据集的数据源，可能需要十几秒到一分钟
-            {data ? `（已聚合 ${data.items.length} 个数据源，扫描时间 ${dayjs(data.fetchedAt).format('HH:mm:ss')}）` : '…'}
-          </span>
-        }
+        style={{ marginBottom: 16 }}
+        message="影响分析视角"
+        description="同一个数据源可能被多个工作区的数据集共同使用。展开行即可查看关联数据集，变更连接信息前建议先确认影响范围。"
       />
-      <div className="table-toolbar">
+
+      <div className="filter-bar">
         <Input
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索连接地址 / 数据库 / 数据集名"
-          style={{ width: 320 }}
+          style={{ width: 340, maxWidth: '100%' }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
         <Select
           allowClear
-          placeholder="按类型筛选"
-          style={{ width: 200 }}
+          placeholder="全部类型"
+          style={{ width: 200, maxWidth: '100%' }}
           value={typeFilter}
           onChange={setTypeFilter}
           options={typeOptions}
         />
-        <span className="text-muted">共 {filtered.length} 个数据源</span>
-        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
-          导出 CSV
-        </Button>
-        <Button
-          icon={<ReloadOutlined />}
-          loading={isValidating}
-          onClick={() => mutate(() => fetcher('/api/datasources?force=1'))}
-        >
-          强制重扫
-        </Button>
+        <span className="filter-summary">
+          {keyword || typeFilter ? `筛选后 ${filtered.length} / ${data?.items.length ?? 0} 个数据源` : `共 ${filtered.length} 个数据源`}
+        </span>
       </div>
+
       <Table<DatasourceIndexItem>
         rowKey="key"
         loading={isLoading}
         dataSource={filtered}
         scroll={{ x: 900 }}
+        locale={{
+          emptyText: (
+            <TableEmpty
+              title={keyword || typeFilter ? '没有匹配的数据源' : '暂无数据源'}
+              description={keyword || typeFilter ? '调整关键词或类型筛选后再试。' : '当前环境尚未扫描到可显示的数据源。'}
+            />
+          ),
+        }}
         pagination={{
           pageSize,
           showSizeChanger: true,
@@ -134,6 +151,7 @@ export default function DatasourcesPage() {
               size="small"
               dataSource={i.datasets}
               pagination={false}
+              locale={{ emptyText: <TableEmpty title="暂无关联数据集" /> }}
               columns={[
                 { title: '数据集', dataIndex: 'name', ellipsis: true },
                 { title: '所在工作区', dataIndex: 'workspaceName', width: 200, ellipsis: true },
@@ -152,18 +170,14 @@ export default function DatasourcesPage() {
             title: '连接（服务器 / 路径 / 网址）',
             dataIndex: 'primary',
             ellipsis: { showTitle: false },
-            render: (v: string) => (
-              <Tooltip title={v} placement="topLeft">
-                {v}
-              </Tooltip>
-            ),
+            render: (v: string) => <Tooltip title={v} placement="topLeft">{v}</Tooltip>,
           },
           {
             title: '数据库 / 连接器',
             dataIndex: 'secondary',
             width: 160,
             ellipsis: true,
-            render: (v?: string) => v ?? '-',
+            render: (v?: string) => v ?? <span className="text-muted">未提供</span>,
           },
           {
             title: '连接方式',
@@ -172,13 +186,11 @@ export default function DatasourcesPage() {
             render: (v?: string) => (v ? <Tag color="orange">本地网关</Tag> : <Tag color="green">云端</Tag>),
           },
           {
-            title: '数据集数',
+            title: '影响数据集',
             dataIndex: 'datasetCount',
-            width: 90,
+            width: 105,
             sorter: (a, b) => a.datasetCount - b.datasetCount,
-            render: (v: number) => (
-              <Tag color={v >= 5 ? 'red' : v >= 2 ? 'gold' : 'default'}>{v}</Tag>
-            ),
+            render: (v: number) => <Tag color={v >= 5 ? 'red' : v >= 2 ? 'gold' : 'default'}>{v}</Tag>,
           },
         ]}
       />
