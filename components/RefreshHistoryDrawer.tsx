@@ -1,9 +1,10 @@
 'use client'
 
-import { Button, Descriptions, Drawer, Table, Tag, Tooltip } from 'antd'
+import { Alert, Button, Descriptions, Drawer, Table, Tag, Tooltip } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
+import ErrorAlert from '@/components/ErrorAlert'
 import { fetcher } from '@/lib/client'
 import type { DatasetView, PbiRefresh, PbiRefreshSchedule } from '@/lib/types'
 
@@ -21,7 +22,9 @@ const DAY_LABELS: Record<string, string> = {
 }
 
 function fmtDuration(r: PbiRefresh): string {
-  if (!r.endTime) return '-'
+  if (!r.endTime) {
+    return ['InProgress', 'NotStarted', 'Unknown'].includes(r.status ?? '') ? '进行中' : '-'
+  }
   const ms = new Date(r.endTime).getTime() - new Date(r.startTime).getTime()
   if (!Number.isFinite(ms) || ms < 0) return '-'
   const s = Math.round(ms / 1000)
@@ -45,7 +48,7 @@ function fmtSchedule(s?: PbiRefreshSchedule) {
   )
 }
 
-/** 数据集刷新记录抽屉，有进行中的刷新时每 30 秒自动轮询；顶部展示定时刷新计划 */
+/** 数据集刷新记录抽屉：打开期间每 30 秒轮询，确保刚提交的刷新也能在服务端出现后自动显示。 */
 export default function RefreshHistoryDrawer({
   open,
   onClose,
@@ -61,12 +64,8 @@ export default function RefreshHistoryDrawer({
     key,
     fetcher,
     {
-      refreshInterval: (latest?: { refreshes: PbiRefresh[] }) => {
-        const active = latest?.refreshes?.some((r) =>
-          ['InProgress', 'NotStarted', 'Unknown'].includes(r.status ?? ''),
-        )
-        return active ? 30_000 : 0
-      },
+      refreshInterval: open ? 30_000 : 0,
+      revalidateOnFocus: open,
     },
   )
 
@@ -74,7 +73,11 @@ export default function RefreshHistoryDrawer({
     open && dataset
       ? `/api/datasets/refresh-schedule?wid=${dataset.workspaceId}&did=${dataset.id}`
       : null
-  const { data: scheduleData } = useSWR<{ schedule: PbiRefreshSchedule }>(scheduleKey, fetcher)
+  const {
+    data: scheduleData,
+    error: scheduleError,
+    mutate: mutateSchedule,
+  } = useSWR<{ schedule: PbiRefreshSchedule }>(scheduleKey, fetcher)
 
   return (
     <Drawer
@@ -83,22 +86,38 @@ export default function RefreshHistoryDrawer({
       width={760}
       title={`刷新记录 — ${dataset?.name ?? ''}`}
       extra={
-        <Button icon={<ReloadOutlined />} loading={isValidating} onClick={() => mutate()}>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isValidating}
+          onClick={() => Promise.all([mutate(), mutateSchedule()])}
+        >
           刷新
         </Button>
       }
     >
       <div style={{ marginBottom: 16, padding: 12, background: '#fafafa', borderRadius: 8 }}>
         <div style={{ fontWeight: 500, marginBottom: 8 }}>定时刷新计划</div>
-        {fmtSchedule(scheduleData?.schedule)}
+        {scheduleError ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="定时刷新计划读取失败"
+            description={scheduleError instanceof Error ? scheduleError.message : String(scheduleError)}
+            action={<Button size="small" onClick={() => mutateSchedule()}>重试</Button>}
+          />
+        ) : (
+          fmtSchedule(scheduleData?.schedule)
+        )}
       </div>
 
-      {error && <p className="text-error">{String(error.message ?? error)}</p>}
+      {error && <ErrorAlert error={error} onRetry={() => mutate()} />}
       <Table
-        rowKey="id"
+        rowKey={(r) => r.id ?? `${r.startTime}:${r.refreshType ?? ''}`}
         size="small"
-        loading={isLoading}
+        loading={isLoading && !data}
         dataSource={data?.refreshes ?? []}
+        scroll={{ x: 760 }}
+        locale={{ emptyText: isLoading ? '正在加载刷新记录…' : '暂无刷新记录' }}
         pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
         columns={[
           {
@@ -136,6 +155,7 @@ export default function RefreshHistoryDrawer({
           },
         ]}
       />
+      {data && isValidating && <p className="text-muted">正在检查最新刷新状态…</p>}
     </Drawer>
   )
 }
