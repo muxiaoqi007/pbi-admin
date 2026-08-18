@@ -5,8 +5,11 @@ import { Button, Input, Table, Tag, Tooltip } from 'antd'
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
+import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
+import TableEmpty from '@/components/TableEmpty'
 import { accessRightOf } from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
@@ -53,43 +56,68 @@ export default function WorkspacesPage() {
 
   return (
     <div>
+      <PageHeader
+        title="工作区"
+        description="从租户视角查看工作区规模、容量、成员与内容分布，点击工作区可进入详情继续排查。"
+        meta={data ? `数据快照：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}` : undefined}
+        actions={
+          <>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={isValidating}
+              onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
+            >
+              刷新
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
+              导出 CSV
+            </Button>
+          </>
+        }
+      />
+
       {error && !data && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && data && <StaleDataAlert error={error} onRetry={() => mutate()} />}
-      <div className="table-toolbar">
+
+      <div className="filter-bar">
         <Input
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索工作区名称 / ID"
-          style={{ width: 300 }}
+          style={{ width: 320, maxWidth: '100%' }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
-        <span className="text-muted">共 {filtered.length} 个工作区</span>
-        <Button
-          icon={<ReloadOutlined />}
-          loading={isValidating}
-          onClick={() => mutate(() => fetcher('/api/snapshot?force=1'))}
-        >
-          刷新列表
-        </Button>
-        <Button icon={<DownloadOutlined />} onClick={doExport} disabled={!data}>
-          导出 CSV
-        </Button>
+        <span className="filter-summary">
+          {keyword ? `筛选后 ${filtered.length} / ${data?.workspaces.length ?? 0} 个工作区` : `共 ${filtered.length} 个工作区`}
+        </span>
       </div>
+
       <Table<WorkspaceView>
         rowKey="id"
         loading={isLoading}
         dataSource={filtered}
         scroll={{ x: 950 }}
-        pagination={{ pageSize, showSizeChanger: true, showTotal: (t) => `共 ${t} 个`, onShowSizeChange: (_, size) => setPageSize(size) }}
+        locale={{
+          emptyText: (
+            <TableEmpty
+              title={keyword ? '没有匹配的工作区' : '暂无工作区'}
+              description={keyword ? '尝试调整搜索关键词。' : '当前环境没有可显示的工作区。'}
+            />
+          ),
+        }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 个`,
+          onShowSizeChange: (_, size) => setPageSize(size),
+        }}
         columns={[
           {
             title: '名称',
             dataIndex: 'name',
             ellipsis: true,
-            render: (v: string, record) => (
-              <a onClick={() => router.push(`/workspaces/${record.id}`)}>{v}</a>
-            ),
+            render: (v: string, record) => <a onClick={() => router.push(`/workspaces/${record.id}`)}>{v}</a>,
           },
           {
             title: '类型',
@@ -103,13 +131,13 @@ export default function WorkspacesPage() {
             dataIndex: 'state',
             width: 90,
             render: (v?: string) =>
-              v === 'Active' ? <Tag color="green">活跃</Tag> : <Tag>{v ?? '-'}</Tag>,
+              v === 'Active' ? <Tag color="green">活跃</Tag> : v === 'Removing' ? <Tag color="red">删除中</Tag> : <Tag>{v ?? '-'}</Tag>,
           },
           {
             title: '专用容量',
             dataIndex: 'isOnDedicatedCapacity',
             width: 90,
-            render: (v?: boolean) => (v ? <Tag color="gold">Premium</Tag> : '-'),
+            render: (v?: boolean) => (v ? <Tag color="gold">Premium</Tag> : <span className="text-muted">共享</span>),
           },
           { title: '成员', dataIndex: 'users', width: 80, render: (u: WorkspaceView['users']) => u.length },
           { title: '报表', dataIndex: 'reportCount', width: 80 },
@@ -119,13 +147,9 @@ export default function WorkspacesPage() {
             ellipsis: { showTitle: false },
             render: (_: unknown, w: WorkspaceView) => {
               const admins = w.users.filter((u) => accessRightOf(u) === 'Admin')
-              if (admins.length === 0) return '-'
+              if (admins.length === 0) return <span className="text-muted">未识别</span>
               const text = admins.map((a) => a.displayName || a.email || a.identifier).join('、')
-              return (
-                <Tooltip title={text} placement="topLeft">
-                  {text}
-                </Tooltip>
-              )
+              return <Tooltip title={text} placement="topLeft">{text}</Tooltip>
             },
           },
         ]}
