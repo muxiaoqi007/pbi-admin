@@ -53,11 +53,13 @@ export default function RefreshModal({
   dataset: DatasetView | null
   onTriggered?: () => void
 }) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [form] = Form.useForm<RefreshFormValues>()
   const [submitting, setSubmitting] = useState(false)
   const mode = Form.useWatch('mode', form)
-  const enhanced = mode !== 'all'
+  const refreshType = Form.useWatch('type', form)
+  const ignoreRefreshPolicy = Form.useWatch('ignoreRefreshPolicy', form)
+  const enhanced = mode === 'allEnhanced' || mode === 'tables'
 
   useEffect(() => {
     if (open && dataset) {
@@ -80,9 +82,8 @@ export default function RefreshModal({
     open && Boolean(dataset),
   )
 
-  async function submit() {
+  async function execute(values: RefreshFormValues) {
     if (!dataset) return
-    const values = await form.validateFields()
     // Only persist names typed by the user; API/cache options retain their original provenance.
     if (values.mode === 'tables' && values.tables?.length) {
       const known = new Set(tables.map((table) => table.name))
@@ -104,7 +105,7 @@ export default function RefreshModal({
           ? values.effectiveDate.startOf('day').toISOString()
           : undefined,
       })
-      message.success('刷新请求已提交，可在刷新记录中查看进度')
+      message.success('刷新请求已提交，正在打开刷新记录')
       onClose()
       onTriggered?.()
     } catch (e) {
@@ -114,22 +115,50 @@ export default function RefreshModal({
     }
   }
 
+  async function submit() {
+    if (!dataset || submitting) return
+    let values: RefreshFormValues
+    try {
+      values = await form.validateFields()
+    } catch {
+      return
+    }
+
+    if (values.mode !== 'all' && values.type === 'clearValues') {
+      modal.confirm({
+        title: '确认执行 clearValues？',
+        content:
+          '该处理类型会清除目标模型对象中的数据值，不是普通刷新。请确认这是你明确需要的维护操作。',
+        okText: '确认清除并提交',
+        cancelText: '取消',
+        okButtonProps: { danger: true },
+        onOk: () => execute(values),
+      })
+      return
+    }
+
+    await execute(values)
+  }
+
   return (
     <Modal
       open={open}
-      onCancel={onClose}
+      onCancel={submitting ? undefined : onClose}
+      closable={!submitting}
+      maskClosable={!submitting}
+      keyboard={!submitting}
       title={`立即刷新 — ${dataset?.name ?? ''}`}
       width={560}
       footer={[
-        <Button key="cancel" onClick={onClose}>
+        <Button key="cancel" onClick={onClose} disabled={submitting}>
           取消
         </Button>,
         <Button key="ok" type="primary" loading={submitting} onClick={submit}>
-          开始刷新
+          {submitting ? '正在提交…' : '开始刷新'}
         </Button>,
       ]}
     >
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" disabled={submitting}>
         <Form.Item name="mode" label="刷新方式" rules={[{ required: true }]}>
           <Radio.Group
             options={[
@@ -200,6 +229,16 @@ export default function RefreshModal({
           </Form.Item>
         )}
 
+        {enhanced && refreshType === 'clearValues' && (
+          <Alert
+            type="error"
+            showIcon
+            message="clearValues 是破坏性处理类型"
+            description="它会清除目标对象中的数据值。提交前系统还会再次要求确认。"
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
         {enhanced && (
           <Collapse
             ghost
@@ -232,6 +271,15 @@ export default function RefreshModal({
                     >
                       <Switch />
                     </Form.Item>
+                    {ignoreRefreshPolicy && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message="已忽略增量刷新策略"
+                        description="本次请求将发送 applyRefreshPolicy=false，可能显著增加刷新范围和耗时。"
+                        style={{ marginBottom: 16 }}
+                      />
+                    )}
                     <Form.Item
                       name="effectiveDate"
                       label="增量刷新有效日期"
