@@ -193,7 +193,7 @@ async function executeDaxSchema(workspaceId: string, datasetId: string): Promise
 }
 
 /** 执行单个 DAX 查询并返回行数组 */
-async function executeDaxQuery(workspaceId: string, datasetId: string, dax: string): Promise<Record<string, unknown>[]> {
+export async function executeDaxQuery(workspaceId: string, datasetId: string, dax: string): Promise<Record<string, unknown>[]> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30_000)
   let response: Response
