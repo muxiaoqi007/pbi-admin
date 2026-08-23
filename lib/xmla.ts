@@ -104,3 +104,23 @@ export async function getDatasetSchemaViaXmlaDiagnostics(workspaceId: string, da
 }
 
 
+
+/** 获取数据集的 RLS 角色列表（通过 XMLA TMSCHEMA_ROLES，需要 Premium 容量） */
+export async function getDatasetRlsRoles(workspaceId: string, datasetName: string): Promise<string[]> {
+  const runtime = await resolveRuntime()
+  const ws = await workspaceName(workspaceId)
+  const candidates = endpointCandidates(runtime, ws)
+  let lastError: unknown
+  for (const candidate of candidates) {
+    try {
+      const rows = await execute(candidate, datasetName, 'SELECT * FROM $SYSTEM.TMSCHEMA_ROLES')
+      const roles = rows
+        .map((row) => field(row, 'Name'))
+        .filter(Boolean)
+      return roles
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error ? lastError : new XmlaError('XMLA 连接失败，无法获取 RLS 角色', 502)
+}

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Alert, App, Button, Descriptions, Input, Space, Spin, Tabs, Tag, Typography } from 'antd'
+import { Alert, App, Button, Descriptions, Input, Select, Space, Spin, Tabs, Tag, Typography } from 'antd'
 import { CopyOutlined, ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
@@ -51,6 +51,16 @@ export default function EmbedReportModal({
       setShowRlsForm(true)
     }
   }, [error])
+
+  // RLS 表单显示且有 datasetId 时获取可用角色列表
+  const { data: rlsRolesData, isLoading: rlsRolesLoading } = useSWR<{ roles: string[] }>(
+    showRlsForm && report?.datasetId && report?.workspaceId
+      ? `/api/datasets/rls-roles?wid=${report.workspaceId}&did=${report.datasetId}`
+      : null,
+    fetcher,
+    { revalidateOnFocus: false },
+  )
+  const rlsRoles = rlsRolesData?.roles ?? []
 
   // powerbi-client 动态加载并渲染报表
   useEffect(() => {
@@ -211,12 +221,23 @@ export default function EmbedReportModal({
                           onChange={(e) => setRlsUsername(e.target.value)}
                           style={{ width: 200 }}
                         />
-                        <Input
-                          placeholder="RLS 角色名（如 A院端）"
-                          value={rlsRole}
-                          onChange={(e) => setRlsRole(e.target.value)}
-                          style={{ width: 200 }}
-                        />
+                        {rlsRoles.length > 0 ? (
+                          <Select
+                            placeholder="选择 RLS 角色"
+                            value={rlsRole || undefined}
+                            onChange={setRlsRole}
+                            style={{ width: 200 }}
+                            showSearch
+                            options={rlsRoles.map((role) => ({ value: role, label: role }))}
+                          />
+                        ) : (
+                          <Input
+                            placeholder={rlsRolesLoading ? '正在获取角色…' : '输入 RLS 角色名（如 A院端）'}
+                            value={rlsRole}
+                            onChange={(e) => setRlsRole(e.target.value)}
+                            style={{ width: 200 }}
+                          />
+                        )}
                         <Button
                           type="primary"
                           disabled={!rlsUsername || !rlsRole}
@@ -228,6 +249,11 @@ export default function EmbedReportModal({
                           重新生成
                         </Button>
                       </Space>
+                      {rlsRoles.length === 0 && !rlsRolesLoading && (
+                        <p style={{ margin: '8px 0 0', fontSize: 12, color: '#999' }}>
+                          未自动获取到角色列表（XMLA 端点可能不可用），可直接输入角色名。
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
