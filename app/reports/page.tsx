@@ -6,6 +6,7 @@ import { DownloadOutlined, ExportOutlined, ReloadOutlined, SearchOutlined } from
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import DatasourcesModal from '@/components/DatasourcesModal'
+import EmbedReportModal from '@/components/EmbedReportModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
@@ -21,6 +22,7 @@ export default function ReportsPage() {
   const [usersReport, setUsersReport] = useState<ReportView | null>(null)
   const [datasourceReport, setDatasourceReport] = useState<ReportView | null>(null)
   const [pagesReport, setPagesReport] = useState<ReportView | null>(null)
+  const [embedReport, setEmbedReport] = useState<ReportView | null>(null)
 
   const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
     '/api/snapshot',
@@ -148,10 +150,11 @@ export default function ReportsPage() {
           },
           {
             title: '操作',
-            width: 260,
+            width: 300,
             fixed: 'right',
             render: (_: unknown, r) => (
               <Space size={10}>
+                <a onClick={() => setEmbedReport(r)}>预览</a>
                 <a onClick={() => setUsersReport(r)}>用户</a>
                 <a onClick={() => setPagesReport(r)}>页面</a>
                 {r.datasetId ? (
@@ -211,6 +214,12 @@ export default function ReportsPage() {
           ]}
         />
       </Modal>
+
+      <EmbedReportModal
+        open={!!embedReport}
+        report={embedReport}
+        onClose={() => setEmbedReport(null)}
+      />
     </div>
   )
 }

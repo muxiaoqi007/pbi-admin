@@ -418,6 +418,70 @@ export async function getReportPages(workspaceId: string, reportId: string): Pro
   return data.value ?? []
 }
 
+// ---------------------------------------------------------------------------
+// 嵌入式报表：embed token 生成 + embed URL 获取
+// ---------------------------------------------------------------------------
+
+export interface EmbedTokenResult {
+  token: string
+  tokenId?: string
+  expiration?: string
+}
+
+export interface EmbedConfig {
+  embedUrl: string
+  embedToken: string
+  tokenId?: string
+  expiration?: string
+  reportId: string
+  workspaceId: string
+}
+
+/** 生成报表 embed token（服务主体需在报表所在工作区有 Viewer+ 角色） */
+export async function generateReportEmbedToken(workspaceId: string, reportId: string): Promise<EmbedTokenResult> {
+  const res = await pbiRequest(`/groups/${workspaceId}/reports/${reportId}/GenerateToken`, {
+    method: 'POST',
+    body: JSON.stringify({ accessLevel: 'View' }),
+  })
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new PbiError(
+        res.status,
+        '无法生成 embed token：当前身份对报表或其绑定的数据集没有足够权限。服务主体需要加入报表所在工作区（Viewer+ 角色），且对数据集有读取权限。',
+      )
+    }
+    throw await toPbiError(res)
+  }
+  const data = (await res.json()) as { token?: string; tokenId?: string; expiration?: string }
+  if (!data.token) throw new PbiError(500, 'GenerateToken 未返回 token')
+  return { token: data.token, tokenId: data.tokenId, expiration: data.expiration }
+}
+
+/** 获取报表 embed URL（从报表详情响应的 embedUrl 字段获取） */
+export async function getReportEmbedUrl(workspaceId: string, reportId: string): Promise<string> {
+  const data = await pbiJson<{ embedUrl?: string }>(
+    `/groups/${workspaceId}/reports/${reportId}`,
+  )
+  if (!data.embedUrl) throw new PbiError(404, '报表详情未返回 embedUrl 字段')
+  return data.embedUrl
+}
+
+/** 一次获取完整的嵌入配置（embedUrl + token） */
+export async function getReportEmbedConfig(workspaceId: string, reportId: string): Promise<EmbedConfig> {
+  const [embedUrl, tokenResult] = await Promise.all([
+    getReportEmbedUrl(workspaceId, reportId),
+    generateReportEmbedToken(workspaceId, reportId),
+  ])
+  return {
+    embedUrl,
+    embedToken: tokenResult.token,
+    tokenId: tokenResult.tokenId,
+    expiration: tokenResult.expiration,
+    reportId,
+    workspaceId,
+  }
+}
+
 async function listDatasourcesAdmin(datasetId: string) {
   const data = await pbiJson<{ value: PbiDatasource[] }>(`/admin/datasets/${datasetId}/datasources`)
   return data.value ?? []
