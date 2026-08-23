@@ -435,16 +435,46 @@ export interface EmbedConfig {
   expiration?: string
   reportId: string
   workspaceId: string
+  datasetId?: string
 }
 
-/** 生成报表 embed token（服务主体需在报表所在工作区有 Viewer+ 角色） */
-export async function generateReportEmbedToken(workspaceId: string, reportId: string): Promise<EmbedTokenResult> {
+/** RLS 有效身份（数据集配置了行级安全性时必填） */
+export interface RlsIdentity {
+  username: string
+  roles: string[]
+  datasetId: string
+}
+
+/** 生成报表 embed token（服务主体需在报表所在工作区有 Viewer+ 角色）
+ *  数据集配置了 RLS 时必须传 rlsIdentity，否则报"requires effective identity" */
+export async function generateReportEmbedToken(
+  workspaceId: string,
+  reportId: string,
+  rlsIdentity?: RlsIdentity,
+): Promise<EmbedTokenResult> {
+  const body: Record<string, unknown> = { accessLevel: 'View' }
+  if (rlsIdentity) {
+    body.identities = [
+      {
+        username: rlsIdentity.username,
+        roles: rlsIdentity.roles,
+        datasets: [rlsIdentity.datasetId],
+      },
+    ]
+  }
   const res = await pbiRequest(`/groups/${workspaceId}/reports/${reportId}/GenerateToken`, {
     method: 'POST',
-    body: JSON.stringify({ accessLevel: 'View' }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
+      const text = await res.text().catch(() => '')
+      if (/effective identity/i.test(text)) {
+        throw new PbiError(
+          res.status,
+          '该数据集配置了行级安全性（RLS），生成 embed token 必须指定有效身份。请在下方填写 RLS 用户名和角色后重试。',
+        )
+      }
       throw new PbiError(
         res.status,
         '无法生成 embed token：当前身份对报表或其绑定的数据集没有足够权限。服务主体需要加入报表所在工作区（Viewer+ 角色），且对数据集有读取权限。',
@@ -466,11 +496,15 @@ export async function getReportEmbedUrl(workspaceId: string, reportId: string): 
   return data.embedUrl
 }
 
-/** 一次获取完整的嵌入配置（embedUrl + token） */
-export async function getReportEmbedConfig(workspaceId: string, reportId: string): Promise<EmbedConfig> {
+/** 一次获取完整的嵌入配置（embedUrl + token，支持 RLS） */
+export async function getReportEmbedConfig(
+  workspaceId: string,
+  reportId: string,
+  rlsIdentity?: RlsIdentity,
+): Promise<EmbedConfig> {
   const [embedUrl, tokenResult] = await Promise.all([
     getReportEmbedUrl(workspaceId, reportId),
-    generateReportEmbedToken(workspaceId, reportId),
+    generateReportEmbedToken(workspaceId, reportId, rlsIdentity),
   ])
   return {
     embedUrl,
@@ -479,6 +513,7 @@ export async function getReportEmbedConfig(workspaceId: string, reportId: string
     expiration: tokenResult.expiration,
     reportId,
     workspaceId,
+    datasetId: rlsIdentity?.datasetId,
   }
 }
 
