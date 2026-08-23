@@ -10,6 +10,7 @@ import ErrorAlert from '@/components/ErrorAlert'
 import PageHeader from '@/components/PageHeader'
 import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
+import RlsRolesDrawer from '@/components/RlsRolesDrawer'
 import SchemaDrawer from '@/components/SchemaDrawer'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
@@ -34,6 +35,7 @@ export default function DatasetsPage() {
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
   const [usersDataset, setUsersDataset] = useState<DatasetView | null>(null)
   const [schemaDataset, setSchemaDataset] = useState<DatasetView | null>(null)
+  const [rlsDataset, setRlsDataset] = useState<DatasetView | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
@@ -300,6 +302,7 @@ export default function DatasetsPage() {
                     items: [
                       { key: 'users', label: '用户', onClick: () => setUsersDataset(d) },
                       { key: 'schema', label: '结构', onClick: () => setSchemaDataset(d) },
+                      { key: 'rls', label: 'RLS 角色', onClick: () => setRlsDataset(d) },
                       { key: 'datasources', label: '数据源', onClick: () => setDatasourceDataset(d) },
                       { key: 'reports', label: '关联报表', onClick: () => setReportsDataset(d) },
                       { key: 'history', label: '刷新记录', onClick: () => setHistoryDataset(d) },
@@ -386,6 +389,7 @@ export default function DatasetsPage() {
         <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
       </Drawer>
       <SchemaDrawer open={!!schemaDataset} dataset={schemaDataset} onClose={() => setSchemaDataset(null)} />
+      <RlsRolesDrawer open={!!rlsDataset} dataset={rlsDataset} onClose={() => setRlsDataset(null)} />
       <RefreshModal
         open={!!refreshDataset}
         dataset={refreshDataset}
