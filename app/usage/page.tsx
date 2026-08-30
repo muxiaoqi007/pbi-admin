@@ -221,7 +221,9 @@ interface EmbedUsage {
   reportViews: { reportId: string; workspaceId: string; name: string; views: number; sessions: number }[]
   pageViews: { reportId: string; pageName: string; views: number }[]
   interactions: { eventType: string; count: number }[]
-  recentSessions: { sessionId: string; reportId: string; name: string; startedAt: string; events: number }[]
+  visualClicks: { reportId: string; name: string; pageName: string; visualTitle: string; clicks: number }[]
+  slicerUsage: { sessionId: string; reportId: string; name: string; pageName: string; slicer: string; values: string; at: string }[]
+  recentSessions: { sessionId: string; reportId: string; name: string; startedAt: string; events: number; rlsUsername: string | null; rlsRole: string | null }[]
 }
 
 const EVENT_LABELS: Record<string, string> = {
@@ -237,87 +239,186 @@ function EmbedUsageTab({ days }: { days: number }) {
     revalidateOnFocus: false,
   })
 
+  const viewCount = (data?.reportViews ?? []).reduce((s, r) => s + r.views, 0)
+  const interactionCount = (data?.interactions ?? []).reduce((s, i) => s + i.count, 0)
+  const filterCount = data?.interactions.find((i) => i.eventType === 'filtersApplied')?.count ?? 0
+  const dataClickCount = data?.interactions.find((i) => i.eventType === 'dataSelected')?.count ?? 0
+
+  const kpis = [
+    { title: '报表预览', value: viewCount, hint: 'reportLoaded 事件' },
+    { title: '预览会话', value: data?.sessionCount ?? 0, hint: '按 sessionId 去重' },
+    { title: '交互事件', value: interactionCount, hint: '翻页/点击/筛选等' },
+    { title: '切片器/筛选', value: filterCount, hint: 'filtersApplied 事件' },
+  ]
+
   return (
     <div>
       <div className="table-toolbar">
         <span className="text-muted">
-          统计通过本平台门户/预览打开报表的交互行为（SDK 埋点）。共 {data?.totalEvents ?? 0} 个事件、{data?.sessionCount ?? 0} 个会话。
+          统计通过本平台门户/预览打开报表的交互行为（SDK 埋点）。共 {data?.totalEvents ?? 0} 个事件。
         </span>
         <Button size="small" icon={<ReloadOutlined />} loading={isValidating} onClick={() => mutate()}>
           刷新
         </Button>
       </div>
+
       <Row gutter={16}>
-        <Col span={8}>
-          <Card size="small" title="报表观看排行">
-            <Table
-              rowKey="reportId"
-              size="small"
-              loading={isLoading}
-              dataSource={data?.reportViews ?? []}
-              pagination={false}
-              locale={{ emptyText: <TableEmpty title="暂无预览记录" description="在门户或报表页点击「预览」后这里会出现数据。" /> }}
-              columns={[
-                { title: '报表', dataIndex: 'name', ellipsis: true },
-                { title: '次数', dataIndex: 'views', width: 60 },
-                { title: '会话', dataIndex: 'sessions', width: 60 },
-              ]}
-            />
-          </Card>
-        </Col>
-        <Col span={8}>
-          <Card size="small" title="页面热度">
-            <Table
-              rowKey={(r) => `${r.reportId}:${r.pageName}`}
-              size="small"
-              loading={isLoading}
-              dataSource={data?.pageViews ?? []}
-              pagination={false}
-              locale={{ emptyText: <TableEmpty title="暂无翻页记录" /> }}
-              columns={[
-                { title: '页面', dataIndex: 'pageName', ellipsis: true },
-                { title: '次数', dataIndex: 'views', width: 60 },
-              ]}
-            />
-          </Card>
-        </Col>
-        <Col span={8}>
-          <Card size="small" title="交互类型">
-            <Table
-              rowKey="eventType"
-              size="small"
-              loading={isLoading}
-              dataSource={data?.interactions ?? []}
-              pagination={false}
-              locale={{ emptyText: <TableEmpty title="暂无交互记录" /> }}
-              columns={[
-                {
-                  title: '类型',
-                  dataIndex: 'eventType',
-                  render: (v: string) => EVENT_LABELS[v] ?? v,
-                },
-                { title: '次数', dataIndex: 'count', width: 60 },
-              ]}
-            />
-          </Card>
-        </Col>
+        {kpis.map((k) => (
+          <Col span={6} key={k.title}>
+            <Card size="small">
+              <Tooltip title={k.hint}>
+                <Statistic title={k.title} value={k.value} />
+              </Tooltip>
+            </Card>
+          </Col>
+        ))}
       </Row>
-      <Card size="small" title="最近预览会话" style={{ marginTop: 16 }}>
-        <Table
-          rowKey={(r) => `${r.sessionId}:${r.reportId}`}
-          size="small"
-          loading={isLoading}
-          dataSource={data?.recentSessions ?? []}
-          pagination={{ pageSize: 10 }}
-          locale={{ emptyText: <TableEmpty title="暂无会话" /> }}
-          columns={[
-            { title: '报表', dataIndex: 'name', ellipsis: true },
-            { title: '开始时间', dataIndex: 'startedAt', width: 160, render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss') },
-            { title: '事件数', dataIndex: 'events', width: 80 },
-            { title: '会话', dataIndex: 'sessionId', width: 140, render: (v: string) => <Typography.Text code style={{ fontSize: 11 }}>{v}</Typography.Text> },
-          ]}
-        />
-      </Card>
+
+      <Tabs
+        style={{ marginTop: 16 }}
+        items={[
+          {
+            key: 'overview',
+            label: '观看概览',
+            children: (
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Card size="small" title="报表观看排行">
+                    <Table
+                      rowKey="reportId"
+                      size="small"
+                      loading={isLoading}
+                      dataSource={data?.reportViews ?? []}
+                      pagination={false}
+                      locale={{ emptyText: <TableEmpty title="暂无预览记录" description="在门户或报表页点击「预览」后这里会出现数据。" /> }}
+                      columns={[
+                        { title: '报表', dataIndex: 'name', ellipsis: true },
+                        { title: '次数', dataIndex: 'views', width: 70 },
+                        { title: '会话', dataIndex: 'sessions', width: 70 },
+                      ]}
+                    />
+                  </Card>
+                </Col>
+                <Col span={12}>
+                  <Card size="small" title="页面热度">
+                    <Table
+                      rowKey={(r) => `${r.reportId}:${r.pageName}`}
+                      size="small"
+                      loading={isLoading}
+                      dataSource={data?.pageViews ?? []}
+                      pagination={false}
+                      locale={{ emptyText: <TableEmpty title="暂无翻页记录" /> }}
+                      columns={[
+                        { title: '报表', dataIndex: 'name', ellipsis: true, render: (v, r) => reportName(data, r.reportId, v) },
+                        { title: '页面', dataIndex: 'pageName', ellipsis: true },
+                        { title: '次数', dataIndex: 'views', width: 60 },
+                      ]}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+            ),
+          },
+          {
+            key: 'interactions',
+            label: `交互明细${dataClickCount ? ` (${dataClickCount})` : ''}`,
+            children: (
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Card size="small" title="交互类型">
+                    <Table
+                      rowKey="eventType"
+                      size="small"
+                      loading={isLoading}
+                      dataSource={data?.interactions ?? []}
+                      pagination={false}
+                      locale={{ emptyText: <TableEmpty title="暂无交互记录" /> }}
+                      columns={[
+                        {
+                          title: '类型',
+                          dataIndex: 'eventType',
+                          render: (v: string) => EVENT_LABELS[v] ?? v,
+                        },
+                        { title: '次数', dataIndex: 'count', width: 60 },
+                      ]}
+                    />
+                  </Card>
+                </Col>
+                <Col span={16}>
+                  <Card size="small" title="图表点击排行">
+                    <Table
+                      rowKey={(r) => `${r.reportId}:${r.pageName}:${r.visualTitle}`}
+                      size="small"
+                      loading={isLoading}
+                      dataSource={data?.visualClicks ?? []}
+                      pagination={{ pageSize: 10 }}
+                      locale={{ emptyText: <TableEmpty title="暂无图表点击" description="在预览报表中点击图表数据点后这里会出现排行。" /> }}
+                      columns={[
+                        { title: '报表', dataIndex: 'name', ellipsis: true },
+                        { title: '页面', dataIndex: 'pageName', ellipsis: true, width: 120 },
+                        { title: '图表', dataIndex: 'visualTitle', ellipsis: true },
+                        { title: '点击', dataIndex: 'clicks', width: 55 },
+                      ]}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+            ),
+          },
+          {
+            key: 'slicers',
+            label: `切片器与筛选${filterCount ? ` (${filterCount})` : ''}`,
+            children: (
+              <Card size="small" title="切片器使用记录">
+                <Table
+                  rowKey={(r) => `${r.sessionId}:${r.at}:${r.slicer}:${r.values}`}
+                  size="small"
+                  loading={isLoading}
+                  dataSource={data?.slicerUsage ?? []}
+                  pagination={{ pageSize: 15 }}
+                  locale={{ emptyText: <TableEmpty title="暂无切片器记录" description="预览时在切片器里选中值后这里会出现记录；页面间钻取携带的筛选值不算切片器。" /> }}
+                  columns={[
+                    { title: '时间', dataIndex: 'at', width: 110, render: (v: string) => dayjs(v).format('MM-DD HH:mm:ss') },
+                    { title: '报表', dataIndex: 'name', ellipsis: true },
+                    { title: '页面', dataIndex: 'pageName', ellipsis: true, width: 130 },
+                    { title: '切片器', dataIndex: 'slicer', ellipsis: true, width: 200 },
+                    { title: '选中值', dataIndex: 'values', ellipsis: true },
+                  ]}
+                />
+              </Card>
+            ),
+          },
+          {
+            key: 'sessions',
+            label: '预览会话',
+            children: (
+              <Card size="small" title="最近预览会话">
+                <Table
+                  rowKey={(r) => `${r.sessionId}:${r.reportId}`}
+                  size="small"
+                  loading={isLoading}
+                  dataSource={data?.recentSessions ?? []}
+                  pagination={{ pageSize: 10 }}
+                  locale={{ emptyText: <TableEmpty title="暂无会话" /> }}
+                  columns={[
+                    { title: '报表', dataIndex: 'name', ellipsis: true },
+                    { title: 'RLS 用户', dataIndex: 'rlsUsername', width: 120, ellipsis: true, render: (v: string | null) => v ?? '-' },
+                    { title: 'RLS 角色', dataIndex: 'rlsRole', width: 120, ellipsis: true, render: (v: string | null) => v ?? '-' },
+                    { title: '开始时间', dataIndex: 'startedAt', width: 160, render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss') },
+                    { title: '事件数', dataIndex: 'events', width: 80 },
+                    { title: '会话', dataIndex: 'sessionId', width: 140, render: (v: string) => <Typography.Text code style={{ fontSize: 11 }}>{v}</Typography.Text> },
+                  ]}
+                />
+              </Card>
+            ),
+          },
+        ]}
+      />
     </div>
   )
+}
+
+/** 页面热度里按 reportId 补报表名 */
+function reportName(data: EmbedUsage | undefined, reportId: string, fallback: string): string {
+  return data?.reportViews.find((r) => r.reportId === reportId)?.name ?? fallback
 }

@@ -9,6 +9,29 @@ import ErrorAlert from '@/components/ErrorAlert'
 import { fetcher } from '@/lib/client'
 import type { ReportView } from '@/lib/types'
 
+/** powerbi-client 页面对象（只用到的字段） */
+interface PageLike {
+  name?: string
+  displayName?: string
+}
+
+/** powerbi-client 视觉对象（只用到的字段） */
+interface VisualLike {
+  name?: string
+  title?: string
+  type?: string
+  getFilters?: () => Promise<FilterLike[]>
+}
+
+/** powerbi-client 页面级筛选器/切片器状态（只用到的字段） */
+interface FilterLike {
+  filterType?: string | number
+  target?: { table?: string; column?: string; measure?: string }
+  operator?: string
+  values?: unknown[]
+  conditions?: unknown[]
+}
+
 interface EmbedConfig {
   embedUrl: string
   embedToken: string
@@ -62,8 +85,10 @@ export default function EmbedReportModal({
   )
   const rlsRoles = rlsRolesData?.roles ?? []
 
-  // 埋点：会话 ID + 事件缓冲上报
+  // 埋点：会话 ID + 事件缓冲上报；currentPageRef 跟踪当前页（所有事件都带上页面名）
   const sessionIdRef = useRef<string>('')
+  const currentPageRef = useRef<string>('')
+  const lastSlicerCaptureRef = useRef(0)
   const eventBufferRef = useRef<Record<string, unknown>[]>([])
   const flushTimerRef = useRef<number | null>(null)
 
@@ -71,17 +96,23 @@ export default function EmbedReportModal({
     if (open && !sessionIdRef.current) {
       sessionIdRef.current = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     }
-    if (!open) sessionIdRef.current = ''
+    if (!open) {
+      sessionIdRef.current = ''
+      currentPageRef.current = ''
+    }
   }, [open])
 
   function trackEvent(eventType: string, pageName?: string, details?: Record<string, unknown>) {
     if (!open || !report || !sessionIdRef.current) return
+    const page = pageName ?? currentPageRef.current
     eventBufferRef.current.push({
       sessionId: sessionIdRef.current,
       reportId: report.id,
       workspaceId: report.workspaceId,
       eventType,
-      pageName,
+      pageName: page || undefined,
+      rlsUsername: rlsUsername || undefined,
+      rlsRole: rlsRole || undefined,
       details,
       reportName: report.name,
       ts: new Date().toISOString(),
@@ -154,14 +185,98 @@ export default function EmbedReportModal({
           },
         })
         // 埋点：监听报表交互事件（powerbi-client SDK）
+        // 注意：SDK 事件统一为 ICustomEvent，业务数据在 e.detail 里；
+        // 'loaded' 是白名单事件名（'reportLoaded' 不是），埋点仍记为 reportLoaded
         const pbiReport = report as unknown as {
-          on: (event: string, handler: (e: { newPage?: { displayName?: string }; detail?: Record<string, unknown> }) => void) => void
+          on: (event: string, handler: (e: { detail?: Record<string, unknown> }) => void) => void
+          getActivePage?: () => Promise<(PageLike & { getVisuals?: () => Promise<VisualLike[]> }) | undefined>
         }
-        pbiReport.on('reportLoaded', () => trackEvent('reportLoaded'))
-        pbiReport.on('pageChanged', (e) => trackEvent('pageChanged', e?.newPage?.displayName))
-        pbiReport.on('dataSelected', (e) => trackEvent('dataSelected', undefined, e?.detail ?? {}))
+        const onCurrentPage = (page: { name?: string; displayName?: string } | undefined) => {
+          if (page?.displayName) currentPageRef.current = page.displayName
+        }
+        // 切片器值直接从切片器视觉对象读取（visual.getFilters()）。
+        // 不用 page.getFilters()：它会把钻取/交叉筛选带过来的筛选值混进来，分不清哪些是用户在切片器里选的
+        const captureSlicerStates = async (): Promise<Array<{ visual: string; table: string; column: string; operator?: string; values: unknown[] }>> => {
+          try {
+            const page = await pbiReport.getActivePage?.()
+            if (!page?.getVisuals) return []
+            const visuals = await page.getVisuals()
+            const slicerVisuals = visuals.filter((v) => (v.type ?? '').toLowerCase() === 'slicer')
+            const out: Array<{ visual: string; table: string; column: string; operator?: string; values: unknown[] }> = []
+            for (const v of slicerVisuals) {
+              try {
+                const filters = (await v.getFilters?.()) ?? []
+                for (const f of filters) {
+                  if ((f.values?.length ?? 0) === 0 && (f.conditions?.length ?? 0) === 0) continue
+                  out.push({
+                    visual: v.title || v.name || '',
+                    table: f.target?.table ?? '',
+                    column: f.target?.column ?? f.target?.measure ?? '',
+                    operator: f.operator,
+                    values: (f.values ?? f.conditions ?? []).slice(0, 20),
+                  })
+                }
+              } catch { /* 单个切片器读取失败不影响其余 */ }
+            }
+            return out.filter((s) => s.column)
+          } catch {
+            return []
+          }
+        }
+        pbiReport.on('loaded', () => {
+          // 首次打开不触发 pageChanged，主动查当前页；等渲染稳定后再取页面名和切片器状态
+          pbiReport.getActivePage?.()
+            .then((page) => {
+              onCurrentPage(page)
+              window.setTimeout(() => {
+                captureSlicerStates().then((slicers) => trackEvent('reportLoaded', currentPageRef.current || undefined, slicers.length ? { slicers } : undefined))
+              }, 800)
+            })
+            .catch(() => trackEvent('reportLoaded'))
+        })
+        pbiReport.on('pageChanged', (e) => {
+          const page = (e?.detail as { newPage?: { name?: string; displayName?: string } } | undefined)?.newPage
+          onCurrentPage(page)
+          // 翻页后稍等新页筛选器就绪再取切片器状态
+          window.setTimeout(() => {
+            captureSlicerStates().then((slicers) => trackEvent('pageChanged', page?.displayName, slicers.length ? { slicers } : undefined))
+          }, 600)
+        })
+        pbiReport.on('dataSelected', (e) => {
+          // 只保留需要的字段，避免整包上报（含全部筛选器）被入库截断
+          const d = (e?.detail ?? {}) as {
+            page?: { displayName?: string }
+            visual?: { title?: string; type?: string; name?: string }
+            dataPoints?: Array<{ values?: Array<{ formattedValue?: string }> }>
+          }
+          trackEvent('dataSelected', undefined, {
+            page: d.page?.displayName,
+            visual: d.visual?.title || d.visual?.type || '未知图表',
+            visualType: d.visual?.type,
+            visualId: d.visual?.name,
+            values: (d.dataPoints ?? []).flatMap((p) => (p.values ?? []).map((v) => v.formattedValue ?? '')).filter(Boolean).slice(0, 5),
+          })
+          // 用户点切片器时 SDK 只抛 dataSelected（visualType=slicer），不一定触发 filtersApplied；
+          // 等选择落地后抓一次页面筛选器，有实际选择就补一条 filtersApplied 埋点（节流防重复）
+          if (d.visual?.type === 'slicer') {
+            const now = Date.now()
+            if (now - lastSlicerCaptureRef.current > 2000) {
+              lastSlicerCaptureRef.current = now
+              window.setTimeout(() => {
+                captureSlicerStates().then((slicers) => {
+                  if (slicers.length) trackEvent('filtersApplied', undefined, { slicers })
+                })
+              }, 800)
+            }
+          }
+        })
         pbiReport.on('buttonClicked', (e) => trackEvent('buttonClicked', undefined, e?.detail ?? {}))
-        pbiReport.on('filtersApplied', (e) => trackEvent('filtersApplied', undefined, e?.detail ?? {}))
+        pbiReport.on('filtersApplied', () => {
+          // SDK 的 filtersApplied 事件不带筛选值，稍等状态落地后读当前页切片器
+          window.setTimeout(() => {
+            captureSlicerStates().then((slicers) => trackEvent('filtersApplied', undefined, { slicers }))
+          }, 500)
+        })
         setEmbedded(true)
         setEmbedError(null)
       } catch (e) {

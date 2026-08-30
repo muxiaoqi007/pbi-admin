@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS embed_events (
   environment_id TEXT NOT NULL, session_id TEXT NOT NULL,
   report_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
   report_name TEXT, event_type TEXT NOT NULL, page_name TEXT, details_json TEXT,
+  rls_username TEXT, rls_role TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_embed_events_env ON embed_events(environment_id, created_at);
@@ -63,7 +64,12 @@ CREATE TABLE IF NOT EXISTS portal_group_items (
   updated_at TEXT NOT NULL,
   PRIMARY KEY(environment_id, group_id, report_id, workspace_id)
 );
-`)
+`);
+
+// 存量库迁移：CREATE TABLE IF NOT EXISTS 不会补新列
+const embedEventCols = (db.prepare('PRAGMA table_info(embed_events)').all() as Array<{ name: string }>).map((c) => c.name)
+if (!embedEventCols.includes('rls_username')) db.prepare('ALTER TABLE embed_events ADD COLUMN rls_username TEXT').run()
+if (!embedEventCols.includes('rls_role')) db.prepare('ALTER TABLE embed_events ADD COLUMN rls_role TEXT').run()
 
 function isFresh(timestamp: string, ttlMs: number): boolean {
   const at = Date.parse(timestamp)
@@ -293,10 +299,12 @@ export interface EmbedEventInput {
   eventType: string
   pageName?: string
   details?: Record<string, unknown>
+  rlsUsername?: string
+  rlsRole?: string
 }
 
 export function saveEmbedEvents(events: EmbedEventInput[]): number {
-  const insert = db.prepare('INSERT INTO embed_events (environment_id,session_id,report_id,workspace_id,report_name,event_type,page_name,details_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+  const insert = db.prepare('INSERT INTO embed_events (environment_id,session_id,report_id,workspace_id,report_name,event_type,page_name,details_json,rls_username,rls_role,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
   const tx = db.transaction(() => {
     for (const e of events) {
       insert.run(
@@ -308,6 +316,8 @@ export function saveEmbedEvents(events: EmbedEventInput[]): number {
         e.eventType.slice(0, 40),
         e.pageName?.slice(0, 120) ?? null,
         e.details ? JSON.stringify(e.details).slice(0, 2000) : null,
+        e.rlsUsername?.slice(0, 120) ?? null,
+        e.rlsRole?.slice(0, 120) ?? null,
         new Date().toISOString(),
       )
     }
@@ -322,7 +332,9 @@ export interface EmbedUsageStats {
   reportViews: Array<{ reportId: string; workspaceId: string; name: string; views: number; sessions: number }>
   pageViews: Array<{ reportId: string; pageName: string; views: number }>
   interactions: Array<{ eventType: string; count: number }>
-  recentSessions: Array<{ sessionId: string; reportId: string; name: string; startedAt: string; events: number }>
+  visualClicks: Array<{ reportId: string; name: string; pageName: string; visualTitle: string; clicks: number }>
+  slicerUsage: Array<{ sessionId: string; name: string; pageName: string; slicer: string; values: string; at: string }>
+  recentSessions: Array<{ sessionId: string; reportId: string; name: string; startedAt: string; events: number; rlsUsername: string | null; rlsRole: string | null }>
 }
 
 export function loadEmbedUsage(environmentId: string, days: number): EmbedUsageStats {
@@ -348,10 +360,46 @@ export function loadEmbedUsage(environmentId: string, days: number): EmbedUsageS
     GROUP BY event_type ORDER BY count DESC`).all(environmentId, cutoff) as Array<{ event_type: string; count: number }>
   const interactions = interactionRows.map((r) => ({ eventType: r.event_type, count: r.count }))
 
-  const sessionRows = db.prepare(`SELECT session_id, report_id, MIN(created_at) AS started_at, COUNT(*) AS events
-    FROM embed_events WHERE environment_id=? AND created_at>=?
-    GROUP BY session_id, report_id ORDER BY started_at DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ session_id: string; report_id: string; started_at: string; events: number }>
-  const recentSessions = sessionRows.map((r) => ({ sessionId: r.session_id, reportId: r.report_id, name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8), startedAt: r.started_at, events: r.events }))
+  // 图表点击明细：dataSelected 的 details_json 新格式存 {page,visual}，旧格式存整包 {page:{displayName},visual:{title}}
+  const visualRows = db.prepare(`SELECT e.report_id,
+      COALESCE(json_extract(e.details_json,'$.page.displayName'), json_extract(e.details_json,'$.page'), e.page_name, '未知页面') AS page_name,
+      COALESCE(json_extract(e.details_json,'$.visual.title'), json_extract(e.details_json,'$.visual'), '未知图表') AS visual_title,
+      COUNT(*) AS clicks
+    FROM embed_events e WHERE e.environment_id=? AND e.created_at>=? AND e.event_type='dataSelected'
+    GROUP BY e.report_id, page_name, visual_title ORDER BY clicks DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ report_id: string; page_name: string; visual_title: string; clicks: number }>
+  const visualClicks = visualRows.map((r) => ({ reportId: r.report_id, name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8), pageName: r.page_name, visualTitle: r.visual_title, clicks: r.clicks }))
 
-  return { totalEvents: total, sessionCount: sessions, reportViews, pageViews, interactions, recentSessions }
+  // 切片器使用记录：展开 reportLoaded/pageChanged/filtersApplied 事件 details.slicers 数组
+  // details_json 可能为 NULL 或被截断的旧格式，用 json_valid 兜底避免 json_each 报错
+  const slicerRows = db.prepare(`SELECT e.session_id, e.report_id, COALESCE(e.page_name,'') AS page_name, e.created_at,
+      json_extract(je.value,'$.visual') AS visual_name,
+      json_extract(je.value,'$.table') AS table_name,
+      json_extract(je.value,'$.column') AS column_name,
+      json_extract(je.value,'$.measure') AS measure_name,
+      json_extract(je.value,'$.values') AS values_json
+    FROM embed_events e, json_each(CASE WHEN json_valid(e.details_json) THEN e.details_json END,'$.slicers') je
+    WHERE e.environment_id=? AND e.created_at>=? AND json_valid(e.details_json) AND json_type(je.value)='object'
+    ORDER BY e.created_at DESC LIMIT 50`).all(environmentId, cutoff) as Array<{ session_id: string; report_id: string; page_name: string; created_at: string; visual_name: string | null; table_name: string | null; column_name: string | null; measure_name: string | null; values_json: string | null }>
+  const slicerUsage = slicerRows.map((r) => {
+    let values = ''
+    try { values = (JSON.parse(r.values_json ?? '[]') as unknown[]).map(String).join(', ') } catch { values = r.values_json ?? '' }
+    const field = `${r.table_name ?? ''}.${r.column_name ?? r.measure_name ?? ''}`
+    return {
+      sessionId: r.session_id,
+      reportId: r.report_id,
+      name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8),
+      pageName: r.page_name,
+      slicer: r.visual_name ? `${r.visual_name} (${field})` : field,
+      values,
+      at: r.created_at,
+    }
+  })
+
+  const sessionRows = db.prepare(`SELECT session_id, report_id, MIN(created_at) AS started_at, COUNT(*) AS events,
+    MAX(rls_username) AS rls_username, MAX(rls_role) AS rls_role
+    FROM embed_events WHERE environment_id=? AND created_at>=?
+    GROUP BY session_id, report_id ORDER BY started_at DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ session_id: string; report_id: string; started_at: string; events: number; rls_username: string | null; rls_role: string | null }>
+  const recentSessions = sessionRows.map((r) => ({ sessionId: r.session_id, reportId: r.report_id, name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8), startedAt: r.started_at, events: r.events, rlsUsername: r.rls_username, rlsRole: r.rls_role }))
+
+  return { totalEvents: total, sessionCount: sessions, reportViews, pageViews, interactions, visualClicks, slicerUsage, recentSessions }
 }

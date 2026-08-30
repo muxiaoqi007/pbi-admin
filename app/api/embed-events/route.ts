@@ -12,6 +12,8 @@ interface EventPayload {
   eventType?: string
   pageName?: string
   details?: Record<string, unknown>
+  rlsUsername?: string
+  rlsRole?: string
   ts?: string
 }
 
@@ -40,6 +42,8 @@ export async function POST(req: NextRequest) {
         pageName: e.pageName,
         reportName: (e as { reportName?: string }).reportName,
         details: e.details,
+        rlsUsername: e.rlsUsername,
+        rlsRole: e.rlsRole,
       })),
     )
     return NextResponse.json({ saved })
