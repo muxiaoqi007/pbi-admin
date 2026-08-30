@@ -204,8 +204,120 @@ export default function UsagePage() {
               />
             ),
           },
+          {
+            key: 'embed',
+            label: '门户预览埋点',
+            children: <EmbedUsageTab days={days} />,
+          },
         ]}
       />
+    </div>
+  )
+}
+
+interface EmbedUsage {
+  totalEvents: number
+  sessionCount: number
+  reportViews: { reportId: string; workspaceId: string; name: string; views: number; sessions: number }[]
+  pageViews: { reportId: string; pageName: string; views: number }[]
+  interactions: { eventType: string; count: number }[]
+  recentSessions: { sessionId: string; reportId: string; name: string; startedAt: string; events: number }[]
+}
+
+const EVENT_LABELS: Record<string, string> = {
+  pageChanged: '翻页',
+  dataSelected: '点击图表数据',
+  buttonClicked: '点击按钮',
+  filtersApplied: '应用筛选',
+}
+
+/** 门户预览埋点统计：谁看了哪个报表、翻页、点击、筛选 */
+function EmbedUsageTab({ days }: { days: number }) {
+  const { data, isLoading, mutate, isValidating } = useSWR<EmbedUsage>(`/api/embed-events?days=${days}`, fetcher, {
+    revalidateOnFocus: false,
+  })
+
+  return (
+    <div>
+      <div className="table-toolbar">
+        <span className="text-muted">
+          统计通过本平台门户/预览打开报表的交互行为（SDK 埋点）。共 {data?.totalEvents ?? 0} 个事件、{data?.sessionCount ?? 0} 个会话。
+        </span>
+        <Button size="small" icon={<ReloadOutlined />} loading={isValidating} onClick={() => mutate()}>
+          刷新
+        </Button>
+      </div>
+      <Row gutter={16}>
+        <Col span={8}>
+          <Card size="small" title="报表观看排行">
+            <Table
+              rowKey="reportId"
+              size="small"
+              loading={isLoading}
+              dataSource={data?.reportViews ?? []}
+              pagination={false}
+              locale={{ emptyText: <TableEmpty title="暂无预览记录" description="在门户或报表页点击「预览」后这里会出现数据。" /> }}
+              columns={[
+                { title: '报表', dataIndex: 'name', ellipsis: true },
+                { title: '次数', dataIndex: 'views', width: 60 },
+                { title: '会话', dataIndex: 'sessions', width: 60 },
+              ]}
+            />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small" title="页面热度">
+            <Table
+              rowKey={(r) => `${r.reportId}:${r.pageName}`}
+              size="small"
+              loading={isLoading}
+              dataSource={data?.pageViews ?? []}
+              pagination={false}
+              locale={{ emptyText: <TableEmpty title="暂无翻页记录" /> }}
+              columns={[
+                { title: '页面', dataIndex: 'pageName', ellipsis: true },
+                { title: '次数', dataIndex: 'views', width: 60 },
+              ]}
+            />
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small" title="交互类型">
+            <Table
+              rowKey="eventType"
+              size="small"
+              loading={isLoading}
+              dataSource={data?.interactions ?? []}
+              pagination={false}
+              locale={{ emptyText: <TableEmpty title="暂无交互记录" /> }}
+              columns={[
+                {
+                  title: '类型',
+                  dataIndex: 'eventType',
+                  render: (v: string) => EVENT_LABELS[v] ?? v,
+                },
+                { title: '次数', dataIndex: 'count', width: 60 },
+              ]}
+            />
+          </Card>
+        </Col>
+      </Row>
+      <Card size="small" title="最近预览会话" style={{ marginTop: 16 }}>
+        <Table
+          rowKey={(r) => `${r.sessionId}:${r.reportId}`}
+          size="small"
+          loading={isLoading}
+          dataSource={data?.recentSessions ?? []}
+          pagination={{ pageSize: 10 }}
+          locale={{ emptyText: <TableEmpty title="暂无会话" /> }}
+          columns={[
+            { title: '报表', dataIndex: 'name', ellipsis: true },
+            { title: '开始时间', dataIndex: 'startedAt', width: 160, render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss') },
+            { title: '事件数', dataIndex: 'events', width: 80 },
+            { title: '会话', dataIndex: 'sessionId', width: 140, render: (v: string) => <Typography.Text code style={{ fontSize: 11 }}>{v}</Typography.Text> },
+          ]}
+        />
+      </Card>
     </div>
   )
 }

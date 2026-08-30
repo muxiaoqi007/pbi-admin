@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS column_notes (
   note TEXT NOT NULL, updated_at TEXT NOT NULL,
   PRIMARY KEY(environment_id, workspace_id, dataset_id, table_name, column_name)
 );
+CREATE TABLE IF NOT EXISTS embed_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  environment_id TEXT NOT NULL, session_id TEXT NOT NULL,
+  report_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+  report_name TEXT, event_type TEXT NOT NULL, page_name TEXT, details_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embed_events_env ON embed_events(environment_id, created_at);
 CREATE TABLE IF NOT EXISTS portal_groups (
   environment_id TEXT NOT NULL, group_id TEXT NOT NULL,
   name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
@@ -270,4 +278,80 @@ export function reportInGroup(environmentId: string, reportId: string, workspace
   const row = db.prepare('SELECT group_id FROM portal_group_items WHERE environment_id=? AND report_id=? AND workspace_id=? LIMIT 1')
     .get(environmentId, reportId, workspaceId) as { group_id?: string } | undefined
   return row?.group_id
+}
+
+// ---------------------------------------------------------------------------
+// 嵌入埋点：报表预览会话中的用户交互事件
+// ---------------------------------------------------------------------------
+
+export interface EmbedEventInput {
+  environmentId: string
+  sessionId: string
+  reportId: string
+  workspaceId: string
+  reportName?: string
+  eventType: string
+  pageName?: string
+  details?: Record<string, unknown>
+}
+
+export function saveEmbedEvents(events: EmbedEventInput[]): number {
+  const insert = db.prepare('INSERT INTO embed_events (environment_id,session_id,report_id,workspace_id,report_name,event_type,page_name,details_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+  const tx = db.transaction(() => {
+    for (const e of events) {
+      insert.run(
+        e.environmentId,
+        e.sessionId.slice(0, 64),
+        e.reportId,
+        e.workspaceId,
+        e.reportName?.slice(0, 200) ?? null,
+        e.eventType.slice(0, 40),
+        e.pageName?.slice(0, 120) ?? null,
+        e.details ? JSON.stringify(e.details).slice(0, 2000) : null,
+        new Date().toISOString(),
+      )
+    }
+  })
+  tx()
+  return events.length
+}
+
+export interface EmbedUsageStats {
+  totalEvents: number
+  sessionCount: number
+  reportViews: Array<{ reportId: string; workspaceId: string; name: string; views: number; sessions: number }>
+  pageViews: Array<{ reportId: string; pageName: string; views: number }>
+  interactions: Array<{ eventType: string; count: number }>
+  recentSessions: Array<{ sessionId: string; reportId: string; name: string; startedAt: string; events: number }>
+}
+
+export function loadEmbedUsage(environmentId: string, days: number): EmbedUsageStats {
+  const cutoff = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+  const total = (db.prepare('SELECT COUNT(*) AS c FROM embed_events WHERE environment_id=? AND created_at>=?').get(environmentId, cutoff) as { c: number }).c
+  const sessions = (db.prepare('SELECT COUNT(DISTINCT session_id) AS c FROM embed_events WHERE environment_id=? AND created_at>=?').get(environmentId, cutoff) as { c: number }).c
+
+  const reportRows = db.prepare(`SELECT e.report_id, e.workspace_id, COUNT(*) AS views, COUNT(DISTINCT e.session_id) AS sessions
+    FROM embed_events e WHERE e.environment_id=? AND e.created_at>=? AND e.event_type='reportLoaded'
+    GROUP BY e.report_id, e.workspace_id ORDER BY views DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ report_id: string; workspace_id: string; views: number; sessions: number }>
+  const nameRows = db.prepare('SELECT DISTINCT report_id, report_name FROM embed_events WHERE environment_id=? AND report_name IS NOT NULL').all(environmentId) as Array<{ report_id: string; report_name: string | null }>
+  const nameMap = new Map<string, string>()
+  for (const n of nameRows) if (n.report_name) nameMap.set(n.report_id, n.report_name)
+  const reportViews = reportRows.map((r) => ({ reportId: r.report_id, workspaceId: r.workspace_id, name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8), views: r.views, sessions: r.sessions }))
+
+  const pageRows = db.prepare(`SELECT report_id, page_name, COUNT(*) AS views FROM embed_events
+    WHERE environment_id=? AND created_at>=? AND event_type IN ('pageChanged','reportLoaded') AND page_name IS NOT NULL
+    GROUP BY report_id, page_name ORDER BY views DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ report_id: string; page_name: string; views: number }>
+  const pageViews = pageRows.map((r) => ({ reportId: r.report_id, pageName: r.page_name, views: r.views }))
+
+  const interactionRows = db.prepare(`SELECT event_type, COUNT(*) AS count FROM embed_events
+    WHERE environment_id=? AND created_at>=? AND event_type != 'reportLoaded'
+    GROUP BY event_type ORDER BY count DESC`).all(environmentId, cutoff) as Array<{ event_type: string; count: number }>
+  const interactions = interactionRows.map((r) => ({ eventType: r.event_type, count: r.count }))
+
+  const sessionRows = db.prepare(`SELECT session_id, report_id, MIN(created_at) AS started_at, COUNT(*) AS events
+    FROM embed_events WHERE environment_id=? AND created_at>=?
+    GROUP BY session_id, report_id ORDER BY started_at DESC LIMIT 20`).all(environmentId, cutoff) as Array<{ session_id: string; report_id: string; started_at: string; events: number }>
+  const recentSessions = sessionRows.map((r) => ({ sessionId: r.session_id, reportId: r.report_id, name: nameMap.get(r.report_id) ?? r.report_id.slice(0, 8), startedAt: r.started_at, events: r.events }))
+
+  return { totalEvents: total, sessionCount: sessions, reportViews, pageViews, interactions, recentSessions }
 }

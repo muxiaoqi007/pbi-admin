@@ -62,6 +62,69 @@ export default function EmbedReportModal({
   )
   const rlsRoles = rlsRolesData?.roles ?? []
 
+  // 埋点：会话 ID + 事件缓冲上报
+  const sessionIdRef = useRef<string>('')
+  const eventBufferRef = useRef<Record<string, unknown>[]>([])
+  const flushTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (open && !sessionIdRef.current) {
+      sessionIdRef.current = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    }
+    if (!open) sessionIdRef.current = ''
+  }, [open])
+
+  function trackEvent(eventType: string, pageName?: string, details?: Record<string, unknown>) {
+    if (!open || !report || !sessionIdRef.current) return
+    eventBufferRef.current.push({
+      sessionId: sessionIdRef.current,
+      reportId: report.id,
+      workspaceId: report.workspaceId,
+      eventType,
+      pageName,
+      details,
+      reportName: report.name,
+      ts: new Date().toISOString(),
+    })
+    scheduleFlush()
+  }
+
+  function scheduleFlush() {
+    if (flushTimerRef.current !== null) return
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null
+      const events = eventBufferRef.current.splice(0)
+      if (events.length === 0) return
+      fetch('/api/embed-events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ events }),
+        keepalive: true,
+      }).catch(() => {
+        /* 上报失败静默（埋点不阻塞预览） */
+      })
+    }, 2000)
+  }
+
+  // 关闭时立即上报剩余事件
+  useEffect(() => {
+    return () => {
+      const events = eventBufferRef.current.splice(0)
+      if (events.length > 0 && sessionIdRef.current) {
+        fetch('/api/embed-events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ events }),
+          keepalive: true,
+        }).catch(() => {})
+      }
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+    }
+  }, [])
+
   // powerbi-client 动态加载并渲染报表
   useEffect(() => {
     if (!open || !config || !containerRef.current || embedded) return
@@ -77,7 +140,7 @@ export default function EmbedReportModal({
           pbi.factories.routerFactory,
         )
         powerbi.reset(containerRef.current)
-        powerbi.embed(containerRef.current, {
+        const report = powerbi.embed(containerRef.current, {
           type: 'report',
           id: config.reportId,
           embedUrl: config.embedUrl,
@@ -90,6 +153,15 @@ export default function EmbedReportModal({
             },
           },
         })
+        // 埋点：监听报表交互事件（powerbi-client SDK）
+        const pbiReport = report as unknown as {
+          on: (event: string, handler: (e: { newPage?: { displayName?: string }; detail?: Record<string, unknown> }) => void) => void
+        }
+        pbiReport.on('reportLoaded', () => trackEvent('reportLoaded'))
+        pbiReport.on('pageChanged', (e) => trackEvent('pageChanged', e?.newPage?.displayName))
+        pbiReport.on('dataSelected', (e) => trackEvent('dataSelected', undefined, e?.detail ?? {}))
+        pbiReport.on('buttonClicked', (e) => trackEvent('buttonClicked', undefined, e?.detail ?? {}))
+        pbiReport.on('filtersApplied', (e) => trackEvent('filtersApplied', undefined, e?.detail ?? {}))
         setEmbedded(true)
         setEmbedError(null)
       } catch (e) {
