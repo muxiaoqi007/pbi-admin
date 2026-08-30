@@ -1,12 +1,19 @@
 'use client'
 
-import { Alert, Descriptions, Drawer, Table, Tabs, Tag } from 'antd'
+import { useEffect, useState } from 'react'
+import { Alert, App, Button, Descriptions, Drawer, Input, Space, Table, Tabs, Tag } from 'antd'
+import { DownloadOutlined, SaveOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import ErrorAlert from '@/components/ErrorAlert'
-import { fetcher } from '@/lib/client'
+import { fetcher, postJSON } from '@/lib/client'
 import type { DatasetSchema, DatasetView, SchemaColumn, SchemaMeasure, SchemaTable } from '@/lib/types'
 
-/** 数据集结构抽屉：表 / 列 / 度量值 三 Tab（数据来自 getInfo Schema 扫描） */
+interface NotesData {
+  note: string
+  columnNotes: Record<string, string>
+}
+
+/** 数据集结构与文档抽屉：表/列/度量值查看 + 数据集描述/字段备注编辑 + 文档导出 */
 export default function SchemaDrawer({
   open,
   onClose,
@@ -16,28 +23,85 @@ export default function SchemaDrawer({
   onClose: () => void
   dataset: DatasetView | null
 }) {
+  const { message } = App.useApp()
+  const [datasetNote, setDatasetNote] = useState('')
+  const [columnNotes, setColumnNotes] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+
   const { data, error, isLoading } = useSWR<{ schema: DatasetSchema }>(
     open && dataset ? `/api/datasets/schema?wid=${dataset.workspaceId}&did=${dataset.id}` : null,
     fetcher,
   )
   const schema = data?.schema
 
+  const notesKey = open && dataset ? `/api/datasets/notes?wid=${dataset.workspaceId}&did=${dataset.id}` : null
+  const { data: notesData } = useSWR<NotesData>(notesKey, fetcher)
+
+  useEffect(() => {
+    if (notesData) {
+      setDatasetNote(notesData.note)
+      setColumnNotes(notesData.columnNotes)
+    }
+  }, [notesData])
+
+  async function saveNotes() {
+    if (!dataset) return
+    setSaving(true)
+    try {
+      await postJSON('/api/datasets/notes', {
+        wid: dataset.workspaceId,
+        did: dataset.id,
+        note: datasetNote,
+        columnNotes,
+      })
+      message.success('文档已保存')
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const hasSchema = Boolean(schema && schema.tables.length > 0)
+
   return (
     <Drawer
       open={open}
       onClose={onClose}
-      width={860}
-      title={`数据集结构 — ${dataset?.name ?? ''}`}
+      width={900}
+      title={`数据集结构与文档 — ${dataset?.name ?? ''}`}
+      extra={
+        <Space>
+          {hasSchema && (
+            <a href={`/api/datasets/docs?wid=${dataset?.workspaceId}&did=${dataset?.id}`} target="_blank" rel="noreferrer">
+              <Button size="small" icon={<DownloadOutlined />}>导出文档</Button>
+            </a>
+          )}
+          <Button size="small" type="primary" icon={<SaveOutlined />} loading={saving} onClick={saveNotes}>
+            保存文档
+          </Button>
+        </Space>
+      }
     >
       {error && <ErrorAlert error={error} />}
       {isLoading && (
         <Alert
           type="info"
           showIcon
-          message="正在扫描数据集结构…"
-          description="首次扫描需要 5-15 秒（提交 getInfo 扫描并等待完成），之后缓存 30 分钟。"
+          message="正在查询数据集结构…"
+          description="通过 DAX 目录查询（INFO.VIEW）获取表、列和度量值，约需 3-10 秒。"
         />
       )}
+      <div style={{ marginBottom: 16 }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>数据集说明（业务含义、口径、负责人等）</span>
+        <Input.TextArea
+          value={datasetNote}
+          onChange={(e) => setDatasetNote(e.target.value)}
+          placeholder="填写这个数据集的业务说明，保存后会在数据集列表显示「已文档化」标记"
+          autoSize={{ minRows: 2, maxRows: 5 }}
+          style={{ marginTop: 6 }}
+        />
+      </div>
       {schema && (
         <>
           <Descriptions column={3} size="small" style={{ marginBottom: 16 }}>
@@ -90,13 +154,28 @@ export default function SchemaDrawer({
                     )}
                     pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 列` }}
                     columns={[
-                      { title: '表', dataIndex: 'table', width: 200, ellipsis: true },
-                      { title: '列名', dataIndex: ['column', 'name'], ellipsis: true },
+                      { title: '表', dataIndex: 'table', width: 140, ellipsis: true },
+                      { title: '列名', dataIndex: ['column', 'name'], width: 150, ellipsis: true },
                       {
-                        title: '数据类型',
+                        title: '类型',
                         dataIndex: ['column', 'dataType'],
-                        width: 120,
+                        width: 90,
                         render: (v?: string) => <Tag>{v ?? '-'}</Tag>,
+                      },
+                      {
+                        title: '业务说明（可编辑）',
+                        width: 300,
+                        render: (_: unknown, r) => {
+                          const key = `${r.table}.${r.column.name}`
+                          return (
+                            <Input
+                              size="small"
+                              value={columnNotes[key] ?? ''}
+                              placeholder="填写字段业务含义"
+                              onChange={(e) => setColumnNotes((prev) => ({ ...prev, [key]: e.target.value }))}
+                            />
+                          )
+                        },
                       },
                     ]}
                   />
@@ -114,8 +193,8 @@ export default function SchemaDrawer({
                     )}
                     pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个` }}
                     columns={[
-                      { title: '表', dataIndex: 'table', width: 160, ellipsis: true },
-                      { title: '度量值', dataIndex: ['measure', 'name'], ellipsis: true },
+                      { title: '表', dataIndex: 'table', width: 140, ellipsis: true },
+                      { title: '度量值', dataIndex: ['measure', 'name'], width: 160, ellipsis: true },
                       {
                         title: 'DAX 表达式',
                         dataIndex: ['measure', 'expression'],

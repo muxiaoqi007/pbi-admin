@@ -19,14 +19,17 @@ import {
   BarChartOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  EyeOutlined,
   PartitionOutlined,
   SettingOutlined,
   SyncOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import useSWR from 'swr'
 import zhCN from 'antd/locale/zh_CN'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
+import GlobalSearch from '@/components/GlobalSearch'
 import { fetcher, postJSON } from '@/lib/client'
 import type { CloudEnv } from '@/lib/types'
 
@@ -34,15 +37,27 @@ dayjs.locale('zh-cn')
 
 const { Sider, Content, Header } = Layout
 
+/** 分组菜单：内容 / 运维 / 系统 */
 const MENU_ITEMS = [
   { key: '/', icon: <DashboardOutlined />, label: '运营总览' },
-  { key: '/workspaces', icon: <PartitionOutlined />, label: '工作区' },
-  { key: '/reports', icon: <BarChartOutlined />, label: '报表' },
-  { key: '/datasets', icon: <DatabaseOutlined />, label: '数据集' },
-  { key: '/refreshes', icon: <SyncOutlined />, label: '刷新监控' },
-  { key: '/datasources', icon: <ApiOutlined />, label: '数据源' },
-  { key: '/settings', icon: <SettingOutlined />, label: '环境管理' },
+  { type: 'group' as const, label: '内容', children: [
+    { key: '/workspaces', icon: <PartitionOutlined />, label: '工作区' },
+    { key: '/reports', icon: <BarChartOutlined />, label: '报表' },
+    { key: '/datasets', icon: <DatabaseOutlined />, label: '数据集' },
+    { key: '/datasources', icon: <ApiOutlined />, label: '数据源' },
+  ] },
+  { type: 'group' as const, label: '运维', children: [
+    { key: '/refreshes', icon: <SyncOutlined />, label: '刷新监控' },
+    { key: '/usage', icon: <ThunderboltOutlined />, label: '使用分析' },
+  ] },
+  { type: 'group' as const, label: '系统', children: [
+    { key: '/settings', icon: <SettingOutlined />, label: '环境管理' },
+  ] },
 ]
+
+const FLAT_KEYS = MENU_ITEMS.flatMap((item) =>
+  'children' in item && item.children ? item.children.map((c) => c.key) : 'key' in item ? [item.key] : [],
+)
 
 interface ShellEnvironment {
   id: string
@@ -80,9 +95,7 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   }
 
   const selectedKey =
-    MENU_ITEMS.map((i) => i.key)
-      .filter((k) => k !== '/' && pathname.startsWith(k))
-      .sort((a, b) => b.length - a.length)[0] ?? '/'
+    FLAT_KEYS.filter((k) => k !== '/' && pathname.startsWith(k)).sort((a, b) => b.length - a.length)[0] ?? '/'
 
   return (
     <ConfigProvider
@@ -97,79 +110,89 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
     >
       <AntApp>
         <Layout style={{ minHeight: '100vh' }}>
-            <Header className="app-header">
-              <Link href="/" className="app-brand">
-                <span className="app-brand-mark">P</span>
-                <span className="app-brand-title">Power BI 运维中心</span>
-              </Link>
-              <span className="header-subtitle" style={{ color: 'rgba(255,255,255,0.48)', fontSize: 12 }}>
-                Tenant Operations Console
-              </span>
-              <div style={{ flex: 1 }} />
+          <Header className="app-header">
+            <Link href="/" className="app-brand">
+              <span className="app-brand-mark">P</span>
+              <span className="app-brand-title">Power BI 运维中心</span>
+            </Link>
+            <span className="header-subtitle" style={{ color: 'rgba(255,255,255,0.48)', fontSize: 12 }}>
+              Tenant Operations Console
+            </span>
+            <div style={{ flex: 1 }} />
 
-              {activeEnv && (
-                <Tag color={activeEnv.cloud === 'china' ? 'gold' : 'blue'} style={{ marginInlineEnd: 0 }}>
-                  {activeEnv.cloud === 'china' ? '世纪互联' : '国际版'}
+            <GlobalSearch />
+
+            <Tooltip title="切换到业务门户模式（报表目录 + 预览）">
+              <Link href="/portal">
+                <Button size="small" icon={<EyeOutlined />} ghost style={{ borderColor: 'rgba(255,255,255,0.35)', color: '#fff' }}>
+                  门户
+                </Button>
+              </Link>
+            </Tooltip>
+
+            {activeEnv && (
+              <Tag color={activeEnv.cloud === 'china' ? 'gold' : 'blue'} style={{ marginInlineEnd: 0 }}>
+                {activeEnv.cloud === 'china' ? '世纪互联' : '国际版'}
+              </Tag>
+            )}
+            {switchEnvError && (
+              <Tooltip title={switchEnvError}>
+                <Tag
+                  color="error"
+                  closable
+                  onClose={() => setSwitchEnvError(null)}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  环境切换失败
                 </Tag>
-              )}
-              {switchEnvError && (
-                <Tooltip title={switchEnvError}>
-                  <Tag
-                    color="error"
-                    closable
-                    onClose={() => setSwitchEnvError(null)}
-                    style={{ marginInlineEnd: 0 }}
-                  >
-                    环境切换失败
-                  </Tag>
-                </Tooltip>
-              )}
-              {envs.length > 0 ? (
-                <Select
-                  aria-label="当前 Power BI 环境"
-                  className="header-env-select"
-                  size="small"
-                  value={activeEnvId}
-                  onChange={switchEnv}
-                  loading={Boolean(switchingEnvId)}
-                  disabled={Boolean(switchingEnvId)}
-                  style={{ width: 240 }}
-                  popupMatchSelectWidth={false}
-                  options={envs.map((env) => ({
-                    value: env.id,
-                    label: `${env.name}${env.readOnly ? ' · 服务器托管' : ''}`,
-                  }))}
-                />
-              ) : pathname !== '/settings' && configData ? (
-                <Link href="/settings">
-                  <Button size="small" type="primary">
-                    配置环境
-                  </Button>
-                </Link>
-              ) : null}
-            </Header>
-            <Layout>
-              <Sider
-                className="app-sider"
-                collapsible
-                collapsed={collapsed}
-                onCollapse={setCollapsed}
-                width={190}
-                collapsedWidth={72}
+              </Tooltip>
+            )}
+            {envs.length > 0 ? (
+              <Select
+                aria-label="当前 Power BI 环境"
+                className="header-env-select"
+                size="small"
+                value={activeEnvId}
+                onChange={switchEnv}
+                loading={Boolean(switchingEnvId)}
+                disabled={Boolean(switchingEnvId)}
+                style={{ width: 240 }}
+                popupMatchSelectWidth={false}
+                options={envs.map((env) => ({
+                  value: env.id,
+                  label: `${env.name}${env.readOnly ? ' · 服务器托管' : ''}`,
+                }))}
+              />
+            ) : pathname !== '/settings' && configData ? (
+              <Link href="/settings">
+                <Button size="small" type="primary">
+                  配置环境
+                </Button>
+              </Link>
+            ) : null}
+          </Header>
+          <Layout>
+            <Sider
+              className="app-sider"
+              collapsible
+              collapsed={collapsed}
+              onCollapse={setCollapsed}
+              width={190}
+              collapsedWidth={72}
+              theme="dark"
+            >
+              <Menu
+                mode="inline"
                 theme="dark"
-              >
-                <Menu
-                  mode="inline"
-                  theme="dark"
-                  selectedKeys={[selectedKey]}
-                  items={MENU_ITEMS}
-                  onClick={({ key }) => router.push(key)}
-                  style={{ height: '100%', borderRight: 0, paddingTop: 10 }}
-                />
-              </Sider>
-              <Content className="page-content">{children}</Content>
-            </Layout>
+                selectedKeys={[selectedKey]}
+                items={MENU_ITEMS}
+                onClick={({ key }) => router.push(key)}
+                style={{ height: '100%', borderRight: 0, paddingTop: 10 }}
+              />
+            </Sider>
+            <Content className="page-content">{children}</Content>
           </Layout>
+        </Layout>
       </AntApp>
     </ConfigProvider>
   )

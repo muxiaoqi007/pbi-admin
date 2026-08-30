@@ -32,6 +32,29 @@ CREATE TABLE IF NOT EXISTS dataset_datasources (
 CREATE INDEX IF NOT EXISTS idx_tables_dataset ON dataset_tables(environment_id, dataset_id);
 CREATE INDEX IF NOT EXISTS idx_sources_env ON dataset_datasources(environment_id);
 CREATE TABLE IF NOT EXISTS catalog_state (environment_id TEXT NOT NULL, cache_key TEXT NOT NULL, value_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(environment_id,cache_key));
+CREATE TABLE IF NOT EXISTS dataset_notes (
+  environment_id TEXT NOT NULL, workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL,
+  note TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY(environment_id, workspace_id, dataset_id)
+);
+CREATE TABLE IF NOT EXISTS column_notes (
+  environment_id TEXT NOT NULL, workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL,
+  table_name TEXT NOT NULL, column_name TEXT NOT NULL,
+  note TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY(environment_id, workspace_id, dataset_id, table_name, column_name)
+);
+CREATE TABLE IF NOT EXISTS portal_groups (
+  environment_id TEXT NOT NULL, group_id TEXT NOT NULL,
+  name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(environment_id, group_id)
+);
+CREATE TABLE IF NOT EXISTS portal_group_items (
+  environment_id TEXT NOT NULL, group_id TEXT NOT NULL, report_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(environment_id, group_id, report_id, workspace_id)
+);
 `)
 
 function isFresh(timestamp: string, ttlMs: number): boolean {
@@ -103,4 +126,148 @@ export function loadCatalogState<T>(environmentId: string, key: string): { value
   if (!row) return null
   if (key === 'datasource-index' && !isFresh(row.updated_at, DATASOURCE_INDEX_TTL_MS)) return null
   return { value: JSON.parse(row.value_json) as T, updatedAt: row.updated_at }
+}
+
+// ---------------------------------------------------------------------------
+// 数据集文档化：数据集备注 + 字段级备注
+// ---------------------------------------------------------------------------
+
+export function saveDatasetNote(input: { environmentId: string; workspaceId: string; datasetId: string; note: string }) {
+  db.prepare(`INSERT INTO dataset_notes VALUES (@environmentId,@workspaceId,@datasetId,@note,@updatedAt)
+    ON CONFLICT(environment_id,workspace_id,dataset_id) DO UPDATE SET note=excluded.note,updated_at=excluded.updatedAt`)
+    .run({ ...input, updatedAt: new Date().toISOString() })
+}
+
+export function loadDatasetNote(environmentId: string, workspaceId: string, datasetId: string): string {
+  const row = db.prepare('SELECT note FROM dataset_notes WHERE environment_id=? AND workspace_id=? AND dataset_id=?')
+    .get(environmentId, workspaceId, datasetId) as { note?: string } | undefined
+  return row?.note ?? ''
+}
+
+export function saveColumnNote(input: { environmentId: string; workspaceId: string; datasetId: string; tableName: string; columnName: string; note: string }) {
+  if (input.note.trim() === '') {
+    db.prepare('DELETE FROM column_notes WHERE environment_id=? AND workspace_id=? AND dataset_id=? AND table_name=? AND column_name=?')
+      .run(input.environmentId, input.workspaceId, input.datasetId, input.tableName, input.columnName)
+    return
+  }
+  db.prepare(`INSERT INTO column_notes VALUES (@environmentId,@workspaceId,@datasetId,@tableName,@columnName,@note,@updatedAt)
+    ON CONFLICT(environment_id,workspace_id,dataset_id,table_name,column_name) DO UPDATE SET note=excluded.note,updated_at=excluded.updatedAt`)
+    .run({ ...input, updatedAt: new Date().toISOString() })
+}
+
+export function loadColumnNotes(environmentId: string, workspaceId: string, datasetId: string): Record<string, string> {
+  const rows = db.prepare('SELECT table_name,column_name,note FROM column_notes WHERE environment_id=? AND workspace_id=? AND dataset_id=?')
+    .all(environmentId, workspaceId, datasetId) as Array<{ table_name: string; column_name: string; note: string }>
+  const map: Record<string, string> = {}
+  for (const r of rows) map[`${r.table_name}.${r.column_name}`] = r.note
+  return map
+}
+
+/** 已文档化数据集 ID 集合（有数据集备注或任意字段备注） */
+export function loadDocumentedDatasetIds(environmentId: string): Set<string> {
+  const ids = new Set<string>()
+  const notes = db.prepare('SELECT dataset_id FROM dataset_notes WHERE environment_id=? AND note != \'\'').all(environmentId) as Array<{ dataset_id: string }>
+  for (const r of notes) ids.add(r.dataset_id)
+  const cols = db.prepare('SELECT DISTINCT dataset_id FROM column_notes WHERE environment_id=?').all(environmentId) as Array<{ dataset_id: string }>
+  for (const r of cols) ids.add(r.dataset_id)
+  return ids
+}
+
+/** 导出数据集文档（Markdown 格式） */
+export function exportDatasetDocMarkdown(environmentId: string, workspaceId: string, datasetId: string, datasetName: string, schema: { tables: Array<{ name: string; columns?: Array<{ name: string; dataType?: string }>; measures?: Array<{ name: string; expression?: string }> }> }): string {
+  const note = loadDatasetNote(environmentId, workspaceId, datasetId)
+  const colNotes = loadColumnNotes(environmentId, workspaceId, datasetId)
+  const lines: string[] = []
+  lines.push(`# ${datasetName}`)
+  lines.push('')
+  if (note) {
+    lines.push(note)
+    lines.push('')
+  }
+  for (const table of schema.tables) {
+    lines.push(`## ${table.name}`)
+    lines.push('')
+    if ((table.columns ?? []).length > 0) {
+      lines.push('| 字段 | 类型 | 说明 |')
+      lines.push('| --- | --- | --- |')
+      for (const col of table.columns ?? []) {
+        const key = `${table.name}.${col.name}`
+        lines.push(`| ${col.name} | ${col.dataType ?? ''} | ${colNotes[key] ?? ''} |`)
+      }
+      lines.push('')
+    }
+    if ((table.measures ?? []).length > 0) {
+      lines.push('### 度量值')
+      lines.push('')
+      for (const m of table.measures ?? []) {
+        lines.push(`- **${m.name}**: \`${m.expression ?? ''}\``)
+      }
+      lines.push('')
+    }
+  }
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// 业务门户：报表分组管理
+// ---------------------------------------------------------------------------
+
+export interface PortalGroup {
+  groupId: string
+  name: string
+  sortOrder: number
+  items: { reportId: string; workspaceId: string }[]
+}
+
+function genId(): string {
+  return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+export function listPortalGroups(environmentId: string): PortalGroup[] {
+  const groups = db.prepare('SELECT group_id,name,sort_order FROM portal_groups WHERE environment_id=? ORDER BY sort_order,name')
+    .all(environmentId) as Array<{ group_id: string; name: string; sort_order: number }>
+  const items = db.prepare('SELECT group_id,report_id,workspace_id FROM portal_group_items WHERE environment_id=? ORDER BY sort_order')
+    .all(environmentId) as Array<{ group_id: string; report_id: string; workspace_id: string }>
+  return groups.map((g) => ({
+    groupId: g.group_id,
+    name: g.name,
+    sortOrder: g.sort_order,
+    items: items.filter((i) => i.group_id === g.group_id).map((i) => ({ reportId: i.report_id, workspaceId: i.workspace_id })),
+  }))
+}
+
+export function createPortalGroup(environmentId: string, name: string): PortalGroup {
+  const id = genId()
+  const max = (db.prepare('SELECT COALESCE(MAX(sort_order),-1) AS m FROM portal_groups WHERE environment_id=?').get(environmentId) as { m: number }).m
+  db.prepare('INSERT INTO portal_groups VALUES (?,?,?,?,?)').run(environmentId, id, name, max + 1, new Date().toISOString())
+  return { groupId: id, name, sortOrder: max + 1, items: [] }
+}
+
+export function renamePortalGroup(environmentId: string, groupId: string, name: string): void {
+  db.prepare('UPDATE portal_groups SET name=?, updated_at=? WHERE environment_id=? AND group_id=?')
+    .run(name, new Date().toISOString(), environmentId, groupId)
+}
+
+export function deletePortalGroup(environmentId: string, groupId: string): void {
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM portal_group_items WHERE environment_id=? AND group_id=?').run(environmentId, groupId)
+    db.prepare('DELETE FROM portal_groups WHERE environment_id=? AND group_id=?').run(environmentId, groupId)
+  })
+  tx()
+}
+
+export function setPortalGroupItems(environmentId: string, groupId: string, items: { reportId: string; workspaceId: string }[]): void {
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM portal_group_items WHERE environment_id=? AND group_id=?').run(environmentId, groupId)
+    const insert = db.prepare('INSERT INTO portal_group_items VALUES (?,?,?,?,?,?)')
+    items.forEach((item, idx) => insert.run(environmentId, groupId, item.reportId, item.workspaceId, idx, new Date().toISOString()))
+  })
+  tx()
+}
+
+/** 未分组报表：加入分组时用 */
+export function reportInGroup(environmentId: string, reportId: string, workspaceId: string): string | undefined {
+  const row = db.prepare('SELECT group_id FROM portal_group_items WHERE environment_id=? AND report_id=? AND workspace_id=? LIMIT 1')
+    .get(environmentId, reportId, workspaceId) as { group_id?: string } | undefined
+  return row?.group_id
 }
