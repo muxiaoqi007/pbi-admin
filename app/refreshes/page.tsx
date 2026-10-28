@@ -1,43 +1,24 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Input, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
+import { useMemo } from 'react'
+import { Alert, Button, Card, Col, Input, Row, Select, Space, Statistic, Table, Tag, Typography } from 'antd'
 import { ReloadOutlined, SearchOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import ErrorText from '@/components/ErrorText'
 import PageHeader from '@/components/PageHeader'
+import RefreshFailureTable from '@/components/RefreshFailureTable'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
 import { fetcher } from '@/lib/client'
-import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
+import { useSnapshot } from '@/lib/use-snapshot'
+import { useUrlState } from '@/lib/use-url-state'
+import { formatDateTimeSeconds, parseRefreshError } from '@/lib/domain/format'
+import { refreshStatusMeta } from '@/lib/domain/labels'
+import type { PbiRefreshable, RefreshFailureScan } from '@/lib/types'
 
-function statusMeta(status?: string) {
-  switch (status) {
-    case 'Completed':
-      return { label: '成功', color: 'green' as const }
-    case 'Failed':
-      return { label: '失败', color: 'red' as const }
-    case 'InProgress':
-      return { label: '进行中', color: 'processing' as const }
-    case 'NotStarted':
-      return { label: '排队中', color: 'gold' as const }
-    case 'Unknown':
-      return { label: '未知', color: 'default' as const }
-    default:
-      return { label: status || '无记录', color: 'default' as const }
-  }
-}
-
-function errorMessage(raw?: string) {
-  if (!raw) return ''
-  try {
-    const parsed = JSON.parse(raw) as { error?: { message?: string }; message?: string }
-    return parsed.error?.message ?? parsed.message ?? raw
-  } catch {
-    return raw
-  }
-}
+const FILTER_DEFAULTS = { q: '', status: '', page: '1', size: '20' }
 
 function durationLabel(start?: string, end?: string) {
   if (!start) return '-'
@@ -50,16 +31,18 @@ function durationLabel(start?: string, end?: string) {
 }
 
 export default function RefreshesPage() {
-  const [keyword, setKeyword] = useState('')
-  const [statusFilter, setStatusFilter] = useState<string | undefined>()
-  const [pageSize, setPageSize] = useState(20)
+  const { values, setValues } = useUrlState(FILTER_DEFAULTS)
+  const keyword = values.q
+  const statusFilter = values.status || undefined
+  const page = Math.max(1, Number(values.page) || 1)
+  const pageSize = Math.max(1, Number(values.size) || 20)
 
   const {
     data: snapshot,
     error: snapshotError,
     isLoading: snapshotLoading,
     mutate: mutateSnapshot,
-  } = useSWR<TenantSnapshot>('/api/snapshot', fetcher, { keepPreviousData: true })
+  } = useSnapshot()
 
   const adminMode = snapshot?.mode === 'admin'
   const {
@@ -72,6 +55,34 @@ export default function RefreshesPage() {
     refreshInterval: 30_000,
     revalidateOnFocus: false,
   })
+
+  const {
+    data: failureData,
+    error: failureError,
+    isLoading: failureLoading,
+    isValidating: failureValidating,
+    mutate: mutateFailures,
+  } = useSWR<RefreshFailureScan>(snapshot ? '/api/refresh-failures' : null, fetcher, {
+    revalidateOnFocus: false,
+  })
+  const failures = useMemo(() => failureData?.failures ?? [], [failureData])
+  const failurePartial = Boolean(failureData?.partial)
+  const filteredFailures = useMemo(() => {
+    const k = keyword.trim().toLowerCase()
+    if (!k) return failures
+    return failures.filter(
+      (failure) =>
+        failure.datasetName.toLowerCase().includes(k) ||
+        failure.workspaceName.toLowerCase().includes(k) ||
+        (failure.error ?? '').toLowerCase().includes(k),
+    )
+  }, [failures, keyword])
+
+  async function refreshAll() {
+    const tasks: Promise<unknown>[] = [mutateFailures(() => fetcher('/api/refresh-failures?force=1'))]
+    if (adminMode) tasks.push(mutateRefreshes())
+    await Promise.all(tasks)
+  }
 
   const refreshables = useMemo(() => refreshData?.refreshables ?? [], [refreshData])
   const datasetById = useMemo(
@@ -131,7 +142,11 @@ export default function RefreshesPage() {
     <div>
       <PageHeader
         title="刷新监控"
-        description="查看租户内可刷新项的最近刷新状态、执行时间、历史耗时统计和失败信息。页面每 30 秒自动检查一次最新状态。"
+        description={
+          adminMode
+            ? '查看租户内可刷新项的最近刷新状态、执行时间、历史耗时统计和失败信息。页面每 30 秒自动检查一次最新状态。'
+            : '查看当前身份可见数据集的刷新失败巡检结果；全租户运行状态与历史耗时统计需要 Admin API。'
+        }
         meta={
           <Space size={6} wrap>
             <Tag color={adminMode ? 'green' : 'orange'}>{adminMode ? 'Admin 模式' : '成员模式'}</Tag>
@@ -140,14 +155,42 @@ export default function RefreshesPage() {
           </Space>
         }
         actions={
-          <Button icon={<ReloadOutlined />} loading={isValidating} onClick={() => mutateRefreshes()} disabled={!adminMode}>
-            立即刷新状态
+          <Button icon={<ReloadOutlined />} loading={isValidating || failureValidating} onClick={refreshAll} disabled={!snapshot}>
+            刷新状态
           </Button>
         }
       />
 
       {snapshotError && !snapshot && <ErrorAlert error={snapshotError} onRetry={() => mutateSnapshot()} />}
       {snapshotError && snapshot && <StaleDataAlert error={snapshotError} onRetry={() => mutateSnapshot()} />}
+
+      {failurePartial && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`刷新巡检未完成：已检查 ${failureData?.scanned ?? 0}/${failureData?.attempted ?? 0} 个可刷新数据集`}
+          description={
+            <>
+              失败 {failures.length} 个，未检查 {failureData?.skipped ?? 0} 个
+              {failureData?.rateLimited
+                ? `（Power BI 限流${failureData.retryAfterSeconds ? `，约 ${Math.ceil(failureData.retryAfterSeconds / 60)} 分钟后可重试` : ''}）`
+                : '（取数失败）'}
+              。当前失败数可能偏低，请稍后重新巡检。
+            </>
+          }
+        />
+      )}
+
+      {failureData && (failureData.noHistory ?? 0) > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`${failureData.noHistory} 个可刷新数据集没有任何刷新记录`}
+          description="这些数据集无法判断最近一次刷新是否成功；请确认是否遗漏了刷新计划。"
+        />
+      )}
 
       {snapshot && snapshot.mode === 'member' && (
         <Alert
@@ -158,20 +201,31 @@ export default function RefreshesPage() {
         />
       )}
 
-      {adminMode && (
-        <>
-          {refreshError && <ErrorAlert error={refreshError} onRetry={() => mutateRefreshes()} />}
+      {adminMode && refreshError && (
+        <ErrorAlert error={refreshError} onRetry={() => mutateRefreshes()} />
+      )}
 
+      {adminMode && !refreshError && (
+        <>
           <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
             <Col xs={12} md={6}>
               <Card className="metric-card">
-                <Statistic title="进行中 / 排队" value={counts.active + counts.queued} prefix={<SyncOutlined spin={counts.active > 0} />} />
+                <Statistic
+                  title="进行中 / 排队"
+                  value={counts.active + counts.queued}
+                  loading={refreshLoading && !refreshData}
+                  prefix={<SyncOutlined spin={counts.active > 0} />}
+                />
                 <div className="metric-hint">进行中 {counts.active} · 排队 {counts.queued}</div>
               </Card>
             </Col>
             <Col xs={12} md={6}>
               <Card className="metric-card">
-                <Statistic title="最近成功" value={counts.completed} />
+                <Statistic
+                  title="最近成功"
+                  value={counts.completed}
+                  loading={refreshLoading && !refreshData}
+                />
                 <div className="metric-hint">最近一次刷新状态为成功</div>
               </Card>
             </Col>
@@ -180,6 +234,7 @@ export default function RefreshesPage() {
                 <Statistic
                   title="最近失败"
                   value={counts.failed}
+                  loading={refreshLoading && !refreshData}
                   prefix={counts.failed > 0 ? <WarningOutlined /> : undefined}
                   valueStyle={counts.failed > 0 ? { color: '#cf1322' } : undefined}
                 />
@@ -188,7 +243,11 @@ export default function RefreshesPage() {
             </Col>
             <Col xs={12} md={6}>
               <Card className="metric-card">
-                <Statistic title="可监控项" value={refreshables.length} />
+                <Statistic
+                  title="可监控项"
+                  value={refreshables.length}
+                  loading={refreshLoading && !refreshData}
+                />
                 <div className="metric-hint">其他 / 未知状态 {counts.unknown}</div>
               </Card>
             </Col>
@@ -200,14 +259,14 @@ export default function RefreshesPage() {
               prefix={<SearchOutlined />}
               placeholder="搜索刷新项 / 工作区 / 类型"
               value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
+              onChange={(event) => setValues({ q: event.target.value, page: '1' })}
               style={{ width: 320 }}
             />
             <Select
               allowClear
               placeholder="按最近状态筛选"
               value={statusFilter}
-              onChange={setStatusFilter}
+              onChange={(value) => setValues({ status: value ?? '', page: '1' })}
               style={{ width: 180 }}
               options={[
                 { value: 'InProgress', label: '进行中' },
@@ -217,7 +276,11 @@ export default function RefreshesPage() {
                 { value: 'Unknown', label: '未知' },
               ]}
             />
-            <span className="filter-summary">显示 {filtered.length} / {rows.length} 个刷新项</span>
+            <span className="filter-summary">
+              {refreshLoading && !refreshData
+                ? '正在加载刷新状态…'
+                : `显示 ${filtered.length} / ${rows.length} 个刷新项`}
+            </span>
           </div>
 
           <Card className="section-card" title="刷新状态清单">
@@ -236,10 +299,12 @@ export default function RefreshesPage() {
               }}
               scroll={{ x: 1100 }}
               pagination={{
+                current: page,
                 pageSize,
                 showSizeChanger: true,
                 showTotal: (total) => `共 ${total} 个`,
-                onShowSizeChange: (_, size) => setPageSize(size),
+                onChange: (nextPage, nextSize) =>
+                  setValues({ page: String(nextPage), size: String(nextSize) }),
               }}
               columns={[
                 { title: '刷新项', dataIndex: 'resolvedName', ellipsis: true },
@@ -256,7 +321,7 @@ export default function RefreshesPage() {
                   dataIndex: 'resolvedStatus',
                   width: 100,
                   render: (status?: string) => {
-                    const meta = statusMeta(status)
+                    const meta = refreshStatusMeta(status)
                     return <Tag color={meta.color}>{meta.label}</Tag>
                   },
                 },
@@ -264,7 +329,7 @@ export default function RefreshesPage() {
                   title: '开始时间',
                   dataIndex: ['lastRefresh', 'startTime'],
                   width: 165,
-                  render: (value?: string) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-'),
+                  render: (value?: string) => formatDateTimeSeconds(value),
                 },
                 {
                   title: '本次耗时',
@@ -288,18 +353,46 @@ export default function RefreshesPage() {
                   title: '错误',
                   width: 220,
                   ellipsis: { showTitle: false },
-                  render: (_: unknown, row) => {
-                    const text = errorMessage(row.lastRefresh?.serviceExceptionJson)
-                    return text ? (
-                      <Tooltip title={text} placement="topLeft">
-                        <span className="text-error">{text}</span>
-                      </Tooltip>
-                    ) : (
-                      '-'
-                    )
-                  },
+                  render: (_: unknown, row) => (
+                    <ErrorText text={parseRefreshError(row.lastRefresh?.serviceExceptionJson)} />
+                  ),
                 },
               ]}
+            />
+          </Card>
+        </>
+      )}
+
+      {snapshot && (!adminMode || refreshError) && (
+        <>
+          {failureError && <ErrorAlert error={failureError} onRetry={() => mutateFailures()} />}
+          <Card className="section-card" title="刷新失败巡检">
+            <div className="filter-bar">
+              <Input
+                allowClear
+                prefix={<SearchOutlined />}
+                placeholder="搜索失败数据集 / 工作区 / 错误"
+                value={keyword}
+                onChange={(event) => setValues({ q: event.target.value, page: '1' })}
+                style={{ width: 340, maxWidth: '100%' }}
+              />
+              <span className="filter-summary">
+                {failureLoading && !failureData
+                  ? '正在巡检刷新状态…'
+                  : `显示 ${filteredFailures.length} / ${failures.length} 项`}
+              </span>
+            </div>
+            <RefreshFailureTable
+              failures={filteredFailures}
+              loading={failureLoading}
+              partial={failurePartial}
+              noHistory={failureData?.noHistory ?? 0}
+              filtered={Boolean(keyword.trim())}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={(nextPage, nextSize) =>
+                setValues({ page: String(nextPage), size: String(nextSize) })
+              }
             />
           </Card>
         </>

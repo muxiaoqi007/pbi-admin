@@ -20,6 +20,9 @@ import type {
   PbiRefreshSchedule,
   PbiReportPage,
   PbiTable,
+  RefreshFailureItem,
+  RefreshFailureScan,
+  RefreshFailureScanError,
   PbiWorkspace,
   PbiWorkspaceUser,
   RefreshType,
@@ -34,10 +37,13 @@ import type {
 export class PbiError extends Error {
   status: number
   code?: string
-  constructor(status: number, message: string, code?: string) {
+  /** 429 响应建议的等待秒数（来自 Retry-After 或错误正文）。 */
+  retryAfterSeconds?: number
+  constructor(status: number, message: string, code?: string, retryAfterSeconds?: number) {
     super(message)
     this.status = status
     this.code = code
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -226,6 +232,18 @@ async function executeDaxQuery(workspaceId: string, datasetId: string, dax: stri
   return table.toArray() as unknown as Record<string, unknown>[]
 }
 
+function retryAfterSecondsOf(res: Response, message: string): number | undefined {
+  const header = res.headers.get('retry-after')
+  if (header) {
+    const seconds = Number(header)
+    if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds))
+    const dateMs = Date.parse(header)
+    if (Number.isFinite(dateMs)) return Math.max(0, Math.round((dateMs - Date.now()) / 1000))
+  }
+  const match = message.match(/retry in (\d+) seconds?/i)
+  return match ? Number(match[1]) : undefined
+}
+
 async function toPbiError(res: Response): Promise<PbiError> {
   const text = await res.text().catch(() => '')
   let message = text || res.statusText
@@ -237,6 +255,7 @@ async function toPbiError(res: Response): Promise<PbiError> {
   } catch {
     /* 非 JSON 错误体，保留原文 */
   }
+  const retryAfterSeconds = res.status === 429 ? retryAfterSecondsOf(res, message) : undefined
   if (res.status === 403) {
     // 区分 token 过期和真正的权限不足
     if (/expired|access token/i.test(message)) {
@@ -250,7 +269,7 @@ async function toPbiError(res: Response): Promise<PbiError> {
       ? `认证未通过 (HTTP 401)：${message}`
       : '认证未通过 (HTTP 401，服务无详细信息)。管理 API 不可用时，本工具会自动降级为成员模式（仅显示当前身份可访问的工作区）；若应为管理模式，请检查租户设置和权限。'
   }
-  return new PbiError(res.status, message, code)
+  return new PbiError(res.status, message, code, retryAfterSeconds)
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +791,20 @@ export async function getDatasetSchema(workspaceId: string, datasetId: string): 
 // 数据源视角：按数据源聚合全部数据集，结果持久化到统一目录数据库。
 // ---------------------------------------------------------------------------
 
+/** SQL Server 的连接串可能带 tcp: 前缀、默认端口 1433 或大小写差异；分组前统一。 */
+function normalizeDatasourcePrimary(type: string, primary: string): string {
+  let value = primary.trim()
+  if (/^(sql|analysisservices)$/i.test(type)) {
+    value = value
+      .replace(/^tcp:/i, '')
+      .replace(/,(?:1433)\b/gi, '')
+      .replace(/:(?:1433)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase()
+  }
+  return value
+}
+
 export async function getDatasourceIndex(force = false): Promise<DatasourceIndex> {
   const stored = loadCatalogState<DatasourceIndex>(activeEnvId(), 'datasource-index')
   if (!force && stored) {
@@ -787,7 +820,8 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
   let scanned = 0
   const errors: DatasourceIndex['errors'] = []
 
-  const CONCURRENCY = 8
+  // 数据源扫描同样会触发 Power BI 限流，保持较低并发并完整记录失败项。
+  const CONCURRENCY = 4
   for (let i = 0; i < snap.datasets.length; i += CONCURRENCY) {
     await Promise.allSettled(
       snap.datasets.slice(i, i + CONCURRENCY).map(async (d) => {
@@ -804,7 +838,7 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
           const cd = s.connectionDetails ?? {}
           const primary = cd.server ?? cd.path ?? cd.url ?? s.name ?? '(未知)'
           const secondary = cd.database ?? cd.kind
-          const key = `${s.datasourceType}|${primary}|${secondary ?? ''}`
+          const key = `${s.datasourceType}|${normalizeDatasourcePrimary(s.datasourceType, primary)}|${secondary ?? ''}`
           let item = map.get(key)
           if (!item) {
             item = {
@@ -851,19 +885,9 @@ export async function getDatasourceIndex(force = false): Promise<DatasourceIndex
 // 刷新失败巡检：扫描可刷新数据集的最近记录，汇总失败项（成员模式可用）
 // ---------------------------------------------------------------------------
 
-export interface RefreshFailureItem {
-  datasetId: string
-  datasetName: string
-  workspaceName: string
-  workspaceId: string
-  startTime: string
-  endTime?: string
-  refreshType?: string
-  error?: string
-}
-
 const FAILURES_TTL_MS = 10 * 60 * 1000
-let failuresCache: { envId: string; at: number; data: RefreshFailureItem[] } | null = null
+const FAILURES_PARTIAL_TTL_MS = 60 * 1000
+let failuresCache: { envId: string; at: number; data: RefreshFailureScan } | null = null
 
 /** 解析 serviceExceptionJson：兼容 {errorCode, errorDescription} 和 {error:{message}} 两种格式 */
 function briefRefreshError(raw?: string): string {
@@ -879,49 +903,122 @@ function briefRefreshError(raw?: string): string {
   }
 }
 
-export async function getRefreshFailures(force = false): Promise<RefreshFailureItem[]> {
-  if (
-    !force &&
-    failuresCache &&
-    failuresCache.envId === activeEnvId() &&
-    Date.now() - failuresCache.at < FAILURES_TTL_MS
-  ) {
-    return failuresCache.data
+function isRateLimitError(error: unknown): error is PbiError {
+  return (
+    (error instanceof PbiError && error.status === 429) ||
+    (error instanceof Error && /(^|\D)429(\D|$)|exceeded the amount of requests/i.test(error.message))
+  )
+}
+
+function retryAfterOf(error: unknown): number | undefined {
+  return error instanceof PbiError ? error.retryAfterSeconds : undefined
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+export async function getRefreshFailures(force = false): Promise<RefreshFailureScan> {
+  const envId = activeEnvId()
+  if (!force && failuresCache && failuresCache.envId === envId) {
+    const ttl = failuresCache.data.partial ? FAILURES_PARTIAL_TTL_MS : FAILURES_TTL_MS
+    if (Date.now() - failuresCache.at < ttl) return failuresCache.data
   }
+
   const snap = await getTenantSnapshot(force)
   const targets = snap.datasets.filter((d) => d.isRefreshable)
   const failures: RefreshFailureItem[] = []
+  const errors: RefreshFailureScanError[] = []
+  let scanned = 0
+  let noHistory = 0
+  let rateLimited = false
+  let retryAfterSeconds: number | undefined
 
-  const CONCURRENCY = 8
+  function record(d: DatasetView, history: PbiRefresh[]) {
+    scanned++
+    if (history.length === 0) {
+      noHistory++
+      return
+    }
+    // 只看最近一次已完结结果（跳过进行中）
+    const last = history.find((r) => r.status !== 'InProgress' && r.status !== 'NotStarted')
+    if (last?.status === 'Failed') {
+      failures.push({
+        datasetId: d.id,
+        datasetName: d.name,
+        workspaceName: d.workspaceName,
+        workspaceId: d.workspaceId,
+        startTime: last.startTime,
+        endTime: last.endTime,
+        refreshType: last.refreshType,
+        error: briefRefreshError(last.serviceExceptionJson),
+      })
+    }
+  }
+
+  function recordError(d: DatasetView, error: unknown) {
+    errors.push({
+      datasetId: d.id,
+      datasetName: d.name,
+      workspaceName: d.workspaceName,
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  // 429 会同时影响整批请求，因此并发降到 4；遇到长时间限流直接停止本轮扫描，
+  // 并把未检查的数据集计入 skipped，禁止把“没查成”当成“没有失败”。
+  const CONCURRENCY = 4
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    if (rateLimited) break
     await Promise.allSettled(
       targets.slice(i, i + CONCURRENCY).map(async (d) => {
+        if (rateLimited) return
         try {
-          const history = await getRefreshHistory(d.workspaceId, d.id)
-          // 只看最近一次结果（跳过进行中的，取最近一条已完结的）
-          const last = history.find((r) => r.status !== 'InProgress' && r.status !== 'NotStarted')
-          if (last?.status === 'Failed') {
-            failures.push({
-              datasetId: d.id,
-              datasetName: d.name,
-              workspaceName: d.workspaceName,
-              workspaceId: d.workspaceId,
-              startTime: last.startTime,
-              endTime: last.endTime,
-              refreshType: last.refreshType,
-              error: briefRefreshError(last.serviceExceptionJson),
-            })
+          record(d, await getRefreshHistory(d.workspaceId, d.id))
+        } catch (error) {
+          if (!isRateLimitError(error)) {
+            recordError(d, error)
+            return
           }
-        } catch {
-          /* 个别数据集刷新历史不可访问时跳过 */
+          const waitSeconds = retryAfterOf(error)
+          if (waitSeconds !== undefined && waitSeconds <= 5) {
+            await sleep(Math.max(1, waitSeconds) * 1000)
+            try {
+              record(d, await getRefreshHistory(d.workspaceId, d.id))
+              return
+            } catch (retryError) {
+              if (isRateLimitError(retryError)) {
+                rateLimited = true
+                retryAfterSeconds = retryAfterOf(retryError) ?? retryAfterSeconds
+              }
+              recordError(d, retryError)
+              return
+            }
+          }
+          rateLimited = true
+          retryAfterSeconds = waitSeconds ?? retryAfterSeconds
+          recordError(d, error)
         }
       }),
     )
   }
 
   failures.sort((a, b) => (a.startTime < b.startTime ? 1 : -1))
-  failuresCache = { envId: activeEnvId(), at: Date.now(), data: failures }
-  return failures
+  const failed = errors.length
+  const skipped = Math.max(0, targets.length - scanned - failed)
+  const data: RefreshFailureScan = {
+    fetchedAt: new Date().toISOString(),
+    attempted: targets.length,
+    scanned,
+    failed,
+    skipped,
+    noHistory,
+    partial: failed > 0 || skipped > 0,
+    rateLimited,
+    retryAfterSeconds,
+    failures,
+    errors: errors.slice(0, 100),
+  }
+  failuresCache = { envId, at: Date.now(), data }
+  return data
 }
 
 export async function getConnectionDiagnostics(force = false) {

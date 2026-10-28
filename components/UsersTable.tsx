@@ -1,18 +1,12 @@
 'use client'
 
-import { Table, Tag, Tooltip } from 'antd'
+import { Table, Tag, Typography } from 'antd'
+import { roleMeta } from '@/lib/domain/labels'
 import type { PbiAdminUser, PbiWorkspaceUser } from '@/lib/types'
 
 export function accessRightOf(u: PbiAdminUser | PbiWorkspaceUser): string | undefined {
   const a = u as PbiAdminUser
   return a.groupUserAccessRight ?? a.reportUserAccessRight ?? a.datasetUserAccessRight ?? a.dashboardUserAccessRight
-}
-
-const ROLE_COLOR: Record<string, string> = {
-  Admin: 'red',
-  Member: 'orange',
-  Contributor: 'blue',
-  Viewer: 'default',
 }
 
 /** 工作区 / 报表 / 数据集共用的用户列表 */
@@ -28,6 +22,7 @@ export default function UsersTable({
       rowKey={(u) => u.identifier + accessRightOf(u)}
       loading={loading}
       dataSource={users}
+      locale={{ emptyText: loading ? '正在加载用户…' : '暂无用户' }}
       pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (t) => `共 ${t} 人` }}
       columns={[
         {
@@ -40,9 +35,9 @@ export default function UsersTable({
           dataIndex: 'identifier',
           ellipsis: { showTitle: false },
           render: (v: string) => (
-            <Tooltip title={v} placement="topLeft">
+            <Typography.Text copyable ellipsis={{ tooltip: v }} style={{ maxWidth: '100%' }}>
               {v}
-            </Tooltip>
+            </Typography.Text>
           ),
         },
         {
@@ -57,8 +52,8 @@ export default function UsersTable({
           dataIndex: 'role',
           width: 110,
           render: (_: unknown, u: PbiAdminUser) => {
-            const role = accessRightOf(u)
-            return role ? <Tag color={ROLE_COLOR[role] ?? 'default'}>{role}</Tag> : '-'
+            const meta = roleMeta(accessRightOf(u))
+            return meta ? <Tag color={meta.color}>{meta.label}</Tag> : '-'
           },
         },
       ]}

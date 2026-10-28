@@ -14,6 +14,14 @@ interface BatchItem {
   name: string
 }
 
+interface BatchResultItem {
+  ok: boolean
+  name: string
+  workspaceId: string
+  datasetId: string
+  error?: string
+}
+
 /** 批量触发全部刷新：{items: [{workspaceId, datasetId, name?}]}，并发 3、单次上限 50 个 */
 export async function POST(req: NextRequest) {
   try {
@@ -38,17 +46,28 @@ export async function POST(req: NextRequest) {
 
     // 共享游标 + 并发 3 的工作线程
     let cursor = 0
-    const worker = async (): Promise<{ ok: boolean; name: string; error?: string }[]> => {
-      const local: { ok: boolean; name: string; error?: string }[] = []
+    const worker = async (): Promise<BatchResultItem[]> => {
+      const local: BatchResultItem[] = []
       for (;;) {
         const i = cursor++
         if (i >= items.length) break
         const item = items[i]
         try {
           await triggerRefresh({ workspaceId: item.workspaceId, datasetId: item.datasetId, mode: 'all' })
-          local.push({ ok: true, name: item.name })
+          local.push({
+            ok: true,
+            name: item.name,
+            workspaceId: item.workspaceId,
+            datasetId: item.datasetId,
+          })
         } catch (e) {
-          local.push({ ok: false, name: item.name, error: e instanceof Error ? e.message : String(e) })
+          local.push({
+            ok: false,
+            name: item.name,
+            workspaceId: item.workspaceId,
+            datasetId: item.datasetId,
+            error: e instanceof Error ? e.message : String(e),
+          })
         }
       }
       return local

@@ -1,53 +1,49 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, App, Button, Drawer, Dropdown, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { DownloadOutlined, ExportOutlined, MoreOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
-import useSWR from 'swr'
+import Link from 'next/link'
+import { Alert, App, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { DownloadOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import PageHeader from '@/components/PageHeader'
-import RefreshHistoryDrawer from '@/components/RefreshHistoryDrawer'
 import RefreshModal from '@/components/RefreshModal'
-import SchemaDrawer from '@/components/SchemaDrawer'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
-import UsersTable from '@/components/UsersTable'
 import { fetcher, postJSON } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
-import type { DatasetView, PbiAdminUser, TenantSnapshot } from '@/lib/types'
+import { useSnapshot } from '@/lib/use-snapshot'
+import { useUrlState } from '@/lib/use-url-state'
+import type { DatasetView } from '@/lib/types'
+
+const BATCH_LIMIT = 50
+const FILTER_DEFAULTS = { q: '', page: '1', size: '20' }
 
 interface BatchResult {
   total: number
   success: number
-  failures: { name: string; error: string }[]
+  failures: { name: string; workspaceId: string; datasetId: string; error: string }[]
 }
 
 export default function DatasetsPage() {
   const { message, modal } = App.useApp()
-  const [keyword, setKeyword] = useState('')
-  const [pageSize, setPageSize] = useState(20)
-  const [datasourceDataset, setDatasourceDataset] = useState<DatasetView | null>(null)
-  const [reportsDataset, setReportsDataset] = useState<DatasetView | null>(null)
-  const [historyDataset, setHistoryDataset] = useState<DatasetView | null>(null)
+  const { values, setValues } = useUrlState(FILTER_DEFAULTS)
+  const keyword = values.q
+  const page = Math.max(1, Number(values.page) || 1)
+  const pageSize = Math.max(1, Number(values.size) || 20)
   const [refreshDataset, setRefreshDataset] = useState<DatasetView | null>(null)
-  const [usersDataset, setUsersDataset] = useState<DatasetView | null>(null)
-  const [schemaDataset, setSchemaDataset] = useState<DatasetView | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [batchRunning, setBatchRunning] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
 
   useEffect(() => {
+    // 兼容旧链接 ?search=；新链接统一使用 ?q=
     const search = new URLSearchParams(window.location.search).get('search')
-    if (search) setKeyword(search)
-  }, [])
+    if (search && !values.q) setValues({ q: search, page: '1' })
+  }, [setValues, values.q])
 
-  const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
-    '/api/snapshot',
-    fetcher,
-    { keepPreviousData: true },
-  )
+  const { data, error, isLoading, mutate, isValidating } = useSnapshot()
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase()
@@ -72,14 +68,13 @@ export default function DatasetsPage() {
     [data],
   )
 
-  const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
-    users: PbiAdminUser[]
-  }>(usersDataset ? `/api/datasets/users?wid=${usersDataset.workspaceId}&did=${usersDataset.id}` : null, fetcher)
+  const filteredRefreshable = useMemo(() => filtered.filter((d) => d.isRefreshable), [filtered])
 
-  const boundReports = useMemo(
-    () => (data?.reports ?? []).filter((r) => r.datasetId === reportsDataset?.id),
-    [data, reportsDataset],
-  )
+  function selectAllFiltered() {
+    setSelected((previous) =>
+      Array.from(new Set([...previous.map(String), ...filteredRefreshable.map((d) => d.id)])),
+    )
+  }
 
   function doExport() {
     exportCSV(
@@ -101,33 +96,68 @@ export default function DatasetsPage() {
   async function runBatchRefresh() {
     const rows = selectedDatasets
     if (rows.length === 0) return
+
+    const chunks: DatasetView[][] = []
+    for (let i = 0; i < rows.length; i += BATCH_LIMIT) {
+      chunks.push(rows.slice(i, i + BATCH_LIMIT))
+    }
+
     setBatchRunning(true)
     setBatchResult(null)
+    const failures: BatchResult['failures'] = []
+    let success = 0
+
     try {
-      const res = await postJSON<BatchResult>('/api/refresh-batch', {
-        items: rows.map((d) => ({ workspaceId: d.workspaceId, datasetId: d.id, name: d.name })),
-      })
-      setBatchResult(res)
-      if (res.failures.length === 0) {
-        setSelected([])
-        message.success(`${res.success}/${res.total} 个数据集刷新请求已提交`)
-      } else {
-        message.warning(`${res.success}/${res.total} 成功，${res.failures.length} 个失败，详见结果明细`)
+      for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index]
+        setBatchProgress({ done: index, total: chunks.length })
+        try {
+          const result = await postJSON<BatchResult>('/api/refresh-batch', {
+            items: chunk.map((dataset) => ({
+              workspaceId: dataset.workspaceId,
+              datasetId: dataset.id,
+              name: dataset.name,
+            })),
+          })
+          success += result.success
+          failures.push(...result.failures)
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error)
+          failures.push(
+            ...chunk.map((dataset) => ({
+              name: dataset.name,
+              workspaceId: dataset.workspaceId,
+              datasetId: dataset.id,
+              error: text,
+            })),
+          )
+        }
       }
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e))
+
+      const result = { total: rows.length, success, failures }
+      setBatchResult(result)
+      if (failures.length === 0) {
+        setSelected([])
+        message.success(`${success}/${rows.length} 个数据集刷新请求已提交`)
+      } else {
+        message.warning(`${success}/${rows.length} 成功，${failures.length} 个失败，详见结果明细`)
+      }
     } finally {
       setBatchRunning(false)
+      setBatchProgress(null)
     }
   }
 
   function confirmBatch() {
     const count = selectedDatasets.length
     if (count === 0) return
+    const batches = Math.ceil(count / BATCH_LIMIT)
     modal.confirm({
       title: `批量刷新 ${count} 个数据集？`,
       content:
-        '将依次提交全部刷新请求（服务端并发 3 个，避免触发限流）。已有刷新排队中的数据集可能被 Power BI 拒绝。',
+        count > BATCH_LIMIT
+          ? `已选 ${count} 个，将自动分 ${batches} 批提交（每批最多 ${BATCH_LIMIT} 个；服务端每批并发 3 个，避免触发限流）。已有刷新排队中的数据集可能被 Power BI 拒绝。`
+          : '将依次提交全部刷新请求（服务端并发 3 个，避免触发限流）。已有刷新排队中的数据集可能被 Power BI 拒绝。',
       okText: '开始提交',
       cancelText: '取消',
       okButtonProps: { loading: batchRunning },
@@ -171,11 +201,17 @@ export default function DatasetsPage() {
           placeholder="搜索数据集名称 / 工作区"
           style={{ width: 340, maxWidth: '100%' }}
           value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          onChange={(e) => setValues({ q: e.target.value, page: '1' })}
         />
         <span className="filter-summary">
           {keyword ? `筛选后 ${filtered.length} / ${data?.datasets.length ?? 0} 个数据集` : `共 ${filtered.length} 个数据集`}
         </span>
+        <Button
+          onClick={selectAllFiltered}
+          disabled={filteredRefreshable.length === 0 || batchRunning}
+        >
+          全选筛选结果（{filteredRefreshable.length}）
+        </Button>
       </div>
 
       {selectedDatasets.length > 0 && (
@@ -205,7 +241,9 @@ export default function DatasetsPage() {
         <Alert
           type="info"
           showIcon
-          message={`正在提交 ${selectedDatasets.length} 个数据集的刷新请求`}
+          message={`正在提交 ${selectedDatasets.length} 个数据集的刷新请求${
+            batchProgress ? `（第 ${batchProgress.done + 1}/${batchProgress.total} 批）` : ''
+          }`}
           description="这是请求提交阶段，不代表 Power BI 已完成刷新。提交完成后可在各数据集的刷新记录中继续查看执行状态。"
           style={{ marginBottom: 12 }}
         />
@@ -243,13 +281,20 @@ export default function DatasetsPage() {
           getCheckboxProps: (d) => ({ disabled: !d.isRefreshable }),
         }}
         pagination={{
+          current: page,
           pageSize,
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 个`,
-          onShowSizeChange: (_, size) => setPageSize(size),
+          onChange: (nextPage, nextSize) =>
+            setValues({ page: String(nextPage), size: String(nextSize) }),
         }}
         columns={[
-          { title: '数据集', dataIndex: 'name', ellipsis: true },
+          {
+            title: '数据集',
+            dataIndex: 'name',
+            ellipsis: true,
+            render: (value: string, record) => <Link href={`/datasets/${record.id}`}>{value}</Link>,
+          },
           { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true },
           {
             title: '刷新能力',
@@ -279,10 +324,10 @@ export default function DatasetsPage() {
           },
           {
             title: '操作',
-            width: 190,
+            width: 140,
             fixed: 'right',
             render: (_: unknown, d) => (
-              <Space size={4}>
+              <Space size={12}>
                 <Tooltip title={d.isRefreshable ? undefined : '该数据集当前不可刷新'}>
                   <Button
                     type="link"
@@ -294,20 +339,7 @@ export default function DatasetsPage() {
                     立即刷新
                   </Button>
                 </Tooltip>
-                <Dropdown
-                  trigger={['click']}
-                  menu={{
-                    items: [
-                      { key: 'users', label: '用户', onClick: () => setUsersDataset(d) },
-                      { key: 'schema', label: '结构', onClick: () => setSchemaDataset(d) },
-                      { key: 'datasources', label: '数据源', onClick: () => setDatasourceDataset(d) },
-                      { key: 'reports', label: '关联报表', onClick: () => setReportsDataset(d) },
-                      { key: 'history', label: '刷新记录', onClick: () => setHistoryDataset(d) },
-                    ],
-                  }}
-                >
-                  <a onClick={(e) => e.preventDefault()}><MoreOutlined /> 更多</a>
-                </Dropdown>
+                <Link href={`/datasets/${d.id}`}>详情</Link>
               </Space>
             ),
           },
@@ -317,7 +349,24 @@ export default function DatasetsPage() {
       {batchResult && batchResult.failures.length > 0 && (
         <Modal
           open
-          footer={<Button type="primary" onClick={() => setBatchResult(null)}>知道了</Button>}
+          footer={
+            <Space>
+              <Button onClick={() => setBatchResult(null)}>关闭</Button>
+              <Button
+                type="primary"
+                onClick={() => {
+                  const failedIds = Array.from(
+                    new Set(batchResult.failures.map((failure) => failure.datasetId)),
+                  )
+                  setSelected(failedIds)
+                  setBatchResult(null)
+                  message.info(`已选中 ${failedIds.length} 个失败数据集，可直接重试`)
+                }}
+              >
+                仅选中失败项（{batchResult.failures.length}）
+              </Button>
+            </Space>
+          }
           onCancel={() => setBatchResult(null)}
           title={`批量刷新结果：成功 ${batchResult.success} / ${batchResult.total}`}
         >
@@ -330,7 +379,7 @@ export default function DatasetsPage() {
           />
           <ul style={{ margin: 0, paddingLeft: 18, maxHeight: 420, overflow: 'auto' }}>
             {batchResult.failures.map((f, index) => (
-              <li key={`${f.name}-${index}`} style={{ marginBottom: 8 }}>
+              <li key={`${f.datasetId}-${index}`} style={{ marginBottom: 8 }}>
                 <Typography.Text strong>{f.name}</Typography.Text>
                 <div className="text-error" style={{ fontSize: 12, wordBreak: 'break-all' }}>{f.error}</div>
               </li>
@@ -339,60 +388,10 @@ export default function DatasetsPage() {
         </Modal>
       )}
 
-      <DatasourcesModal
-        open={!!datasourceDataset}
-        onClose={() => setDatasourceDataset(null)}
-        datasetId={datasourceDataset?.id}
-        datasetName={datasourceDataset?.name}
-        workspaceId={datasourceDataset?.workspaceId}
-      />
-
-      <Modal
-        open={!!reportsDataset}
-        onCancel={() => setReportsDataset(null)}
-        footer={null}
-        width={720}
-        title={`使用该数据集的前端报表 — ${reportsDataset?.name ?? ''}（共 ${boundReports.length} 张）`}
-      >
-        <Table
-          rowKey={(r) => `${r.workspaceId}:${r.id}`}
-          size="small"
-          dataSource={boundReports}
-          pagination={{ pageSize: 10 }}
-          locale={{ emptyText: <TableEmpty title="暂无关联报表" /> }}
-          columns={[
-            { title: '报表', dataIndex: 'name', ellipsis: true },
-            { title: '所在工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },
-            {
-              title: '操作',
-              width: 80,
-              render: (_: unknown, r) =>
-                r.webUrl ? (
-                  <Typography.Link href={r.webUrl} target="_blank">打开 <ExportOutlined /></Typography.Link>
-                ) : <span className="text-muted">无链接</span>,
-            },
-          ]}
-        />
-      </Modal>
-
-      <RefreshHistoryDrawer open={!!historyDataset} dataset={historyDataset} onClose={() => setHistoryDataset(null)} />
-      <Drawer
-        open={!!usersDataset}
-        onClose={() => setUsersDataset(null)}
-        width={680}
-        title={`数据集用户 — ${usersDataset?.name ?? ''}`}
-      >
-        {usersError && <ErrorAlert error={usersError} />}
-        <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
-      </Drawer>
-      <SchemaDrawer open={!!schemaDataset} dataset={schemaDataset} onClose={() => setSchemaDataset(null)} />
       <RefreshModal
         open={!!refreshDataset}
         dataset={refreshDataset}
         onClose={() => setRefreshDataset(null)}
-        onTriggered={() => {
-          if (refreshDataset) setHistoryDataset(refreshDataset)
-        }}
       />
     </div>
   )

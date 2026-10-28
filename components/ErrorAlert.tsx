@@ -1,7 +1,6 @@
 'use client'
 
 import { Alert, Button, Space } from 'antd'
-import Link from 'next/link'
 
 /** 统一的页面级错误提示：显示错误信息 + 重试 + 跳转设置 */
 export default function ErrorAlert({
@@ -27,11 +26,9 @@ export default function ErrorAlert({
             </Button>
           )}
           {needSetup && (
-            <Link href="/settings">
-              <Button size="small" type="primary">
-                前往设置
-              </Button>
-            </Link>
+            <Button size="small" type="primary" href="/settings">
+              前往设置
+            </Button>
           )}
         </Space>
       }

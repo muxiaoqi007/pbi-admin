@@ -23,10 +23,12 @@ import {
   SettingOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
+import type { MenuProps } from 'antd'
 import useSWR from 'swr'
 import zhCN from 'antd/locale/zh_CN'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
+import DataScopeBanner from '@/components/DataScopeBanner'
 import { fetcher, postJSON } from '@/lib/client'
 import type { CloudEnv } from '@/lib/types'
 
@@ -34,14 +36,39 @@ dayjs.locale('zh-cn')
 
 const { Sider, Content, Header } = Layout
 
-const MENU_ITEMS = [
+const NAV_ITEMS = [
   { key: '/', icon: <DashboardOutlined />, label: '运营总览' },
+  { key: '/refreshes', icon: <SyncOutlined />, label: '刷新监控' },
   { key: '/workspaces', icon: <PartitionOutlined />, label: '工作区' },
   { key: '/reports', icon: <BarChartOutlined />, label: '报表' },
   { key: '/datasets', icon: <DatabaseOutlined />, label: '数据集' },
-  { key: '/refreshes', icon: <SyncOutlined />, label: '刷新监控' },
   { key: '/datasources', icon: <ApiOutlined />, label: '数据源' },
   { key: '/settings', icon: <SettingOutlined />, label: '环境管理' },
+]
+
+const MENU_ITEMS: MenuProps['items'] = [
+  {
+    type: 'group',
+    label: '运营',
+    children: NAV_ITEMS.filter((item) => item.key === '/' || item.key === '/refreshes'),
+  },
+  {
+    type: 'group',
+    label: '资产',
+    children: NAV_ITEMS.filter((item) =>
+      ['/workspaces', '/reports', '/datasets'].includes(item.key),
+    ),
+  },
+  {
+    type: 'group',
+    label: '分析',
+    children: NAV_ITEMS.filter((item) => item.key === '/datasources'),
+  },
+  {
+    type: 'group',
+    label: '管理',
+    children: NAV_ITEMS.filter((item) => item.key === '/settings'),
+  },
 ]
 
 interface ShellEnvironment {
@@ -80,8 +107,8 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
   }
 
   const selectedKey =
-    MENU_ITEMS.map((i) => i.key)
-      .filter((k) => k !== '/' && pathname.startsWith(k))
+    NAV_ITEMS.map((item) => item.key)
+      .filter((key) => key !== '/' && pathname.startsWith(key))
       .sort((a, b) => b.length - a.length)[0] ?? '/'
 
   return (
@@ -141,11 +168,9 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
                   }))}
                 />
               ) : pathname !== '/settings' && configData ? (
-                <Link href="/settings">
-                  <Button size="small" type="primary">
-                    配置环境
-                  </Button>
-                </Link>
+                <Button size="small" type="primary" href="/settings">
+                  配置环境
+                </Button>
               ) : null}
             </Header>
             <Layout>
@@ -167,7 +192,10 @@ export default function RootShell({ children }: { children: React.ReactNode }) {
                   style={{ height: '100%', borderRight: 0, paddingTop: 10 }}
                 />
               </Sider>
-              <Content className="page-content">{children}</Content>
+              <Content className="page-content">
+                <DataScopeBanner />
+                {children}
+              </Content>
             </Layout>
           </Layout>
       </AntApp>

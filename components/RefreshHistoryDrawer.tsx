@@ -1,20 +1,16 @@
 'use client'
 
-import { Alert, Button, Descriptions, Drawer, Table, Tag, Tooltip } from 'antd'
+import { Alert, Button, Descriptions, Drawer, Table, Tag } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import ErrorText from '@/components/ErrorText'
 import { fetcher } from '@/lib/client'
+import { responsiveDrawerWidth } from '@/lib/ui'
+import { parseRefreshError } from '@/lib/domain/format'
+import { refreshStatusMeta } from '@/lib/domain/labels'
 import type { DatasetView, PbiRefresh, PbiRefreshSchedule } from '@/lib/types'
-
-const STATUS: Record<string, { color: string; text: string }> = {
-  Completed: { color: 'green', text: '成功' },
-  Failed: { color: 'red', text: '失败' },
-  InProgress: { color: 'blue', text: '进行中' },
-  NotStarted: { color: 'default', text: '排队中' },
-  Unknown: { color: 'default', text: '未知' },
-}
 
 const DAY_LABELS: Record<string, string> = {
   Sunday: '周日', Monday: '周一', Tuesday: '周二', Wednesday: '周三',
@@ -83,7 +79,7 @@ export default function RefreshHistoryDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={760}
+      width={responsiveDrawerWidth(760)}
       title={`刷新记录 — ${dataset?.name ?? ''}`}
       extra={
         <Button
@@ -131,8 +127,8 @@ export default function RefreshHistoryDrawer({
             dataIndex: 'status',
             width: 80,
             render: (v?: string) => {
-              const s = STATUS[v ?? 'Unknown'] ?? { color: 'default', text: v ?? '-' }
-              return <Tag color={s.color}>{s.text}</Tag>
+              const meta = refreshStatusMeta(v)
+              return <Tag color={meta.color}>{meta.label}</Tag>
             },
           },
           { title: '类型', dataIndex: 'refreshType', width: 110 },
@@ -144,27 +140,13 @@ export default function RefreshHistoryDrawer({
           {
             title: '错误信息',
             ellipsis: { showTitle: false },
-            render: (_: unknown, r: PbiRefresh) =>
-              r.serviceExceptionJson ? (
-                <Tooltip title={r.serviceExceptionJson} placement="topLeft">
-                  <span className="text-error">{briefError(r.serviceExceptionJson)}</span>
-                </Tooltip>
-              ) : (
-                '-'
-              ),
+            render: (_: unknown, r: PbiRefresh) => (
+              <ErrorText text={parseRefreshError(r.serviceExceptionJson)} />
+            ),
           },
         ]}
       />
       {data && isValidating && <p className="text-muted">正在检查最新刷新状态…</p>}
     </Drawer>
   )
-}
-
-function briefError(raw: string): string {
-  try {
-    const j = JSON.parse(raw)
-    return j.error?.message ?? j.message ?? raw
-  } catch {
-    return raw
-  }
 }

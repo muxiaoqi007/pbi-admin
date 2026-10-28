@@ -1,10 +1,9 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { Button, Input, Table, Tag, Tooltip } from 'antd'
+import { useMemo } from 'react'
+import Link from 'next/link'
+import { Button, Input, Select, Table, Tag, Tooltip } from 'antd'
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
-import { useRouter } from 'next/navigation'
-import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
 import PageHeader from '@/components/PageHeader'
@@ -13,25 +12,32 @@ import TableEmpty from '@/components/TableEmpty'
 import { accessRightOf } from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
-import type { TenantSnapshot, WorkspaceView } from '@/lib/types'
+import { useSnapshot } from '@/lib/use-snapshot'
+import { useUrlState } from '@/lib/use-url-state'
+import { workspaceStateMeta, workspaceTypeMeta } from '@/lib/domain/labels'
+import type { WorkspaceView } from '@/lib/types'
+
+const FILTER_DEFAULTS = { q: '', type: 'all', page: '1', size: '20' }
 
 export default function WorkspacesPage() {
-  const router = useRouter()
-  const [keyword, setKeyword] = useState('')
-  const [pageSize, setPageSize] = useState(20)
-  const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
-    '/api/snapshot',
-    fetcher,
-    { keepPreviousData: true },
-  )
+  const { values, setValues } = useUrlState(FILTER_DEFAULTS)
+  const keyword = values.q
+  const typeFilter = values.type
+  const page = Math.max(1, Number(values.page) || 1)
+  const pageSize = Math.max(1, Number(values.size) || 20)
+  const { data, error, isLoading, mutate, isValidating } = useSnapshot()
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase()
-    if (!k) return data?.workspaces ?? []
-    return (data?.workspaces ?? []).filter(
-      (w) => w.name.toLowerCase().includes(k) || w.id.toLowerCase().includes(k),
-    )
-  }, [data, keyword])
+    return (data?.workspaces ?? []).filter((w) => {
+      const personal = w.type === 'Personal' || w.type === 'PersonalGroup'
+      if (typeFilter === 'personal' && !personal) return false
+      if (typeFilter === 'admin' && w.type !== 'AdminWorkspace') return false
+      if (typeFilter === 'team' && (personal || w.type === 'AdminWorkspace')) return false
+      if (!k) return true
+      return w.name.toLowerCase().includes(k) || w.id.toLowerCase().includes(k)
+    })
+  }, [data, keyword, typeFilter])
 
   function doExport() {
     exportCSV(
@@ -40,7 +46,7 @@ export default function WorkspacesPage() {
       filtered.map((w) => [
         w.name,
         w.id,
-        w.type === 'Personal' ? '个人' : w.type === 'AdminWorkspace' ? '管理' : '工作区',
+        workspaceTypeMeta(w.type).label,
         w.state ?? '',
         w.isOnDedicatedCapacity ? '是' : '否',
         w.users.length,
@@ -59,7 +65,13 @@ export default function WorkspacesPage() {
       <PageHeader
         title="工作区"
         description="从租户视角查看工作区规模、容量、成员与内容分布，点击工作区可进入详情继续排查。"
-        meta={data ? `数据快照：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}` : undefined}
+        meta={
+          data
+            ? `数据快照：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}`
+            : isLoading
+              ? '正在加载工作区…'
+              : undefined
+        }
         actions={
           <>
             <Button
@@ -86,10 +98,25 @@ export default function WorkspacesPage() {
           placeholder="搜索工作区名称 / ID"
           style={{ width: 320, maxWidth: '100%' }}
           value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          onChange={(e) => setValues({ q: e.target.value, page: '1' })}
+        />
+        <Select
+          value={typeFilter}
+          onChange={(value) => setValues({ type: value, page: '1' })}
+          style={{ width: 160, maxWidth: '100%' }}
+          options={[
+            { value: 'all', label: '全部类型' },
+            { value: 'team', label: '团队工作区' },
+            { value: 'personal', label: '个人工作区' },
+            { value: 'admin', label: '管理工作区' },
+          ]}
         />
         <span className="filter-summary">
-          {keyword ? `筛选后 ${filtered.length} / ${data?.workspaces.length ?? 0} 个工作区` : `共 ${filtered.length} 个工作区`}
+          {isLoading && !data
+            ? '正在加载工作区…'
+            : keyword || typeFilter !== 'all'
+              ? `筛选后 ${filtered.length} / ${data?.workspaces.length ?? 0} 个工作区`
+              : `共 ${filtered.length} 个工作区`}
         </span>
       </div>
 
@@ -101,37 +128,55 @@ export default function WorkspacesPage() {
         locale={{
           emptyText: (
             <TableEmpty
-              title={keyword ? '没有匹配的工作区' : '暂无工作区'}
-              description={keyword ? '尝试调整搜索关键词。' : '当前环境没有可显示的工作区。'}
+              title={
+                isLoading && !data
+                  ? '正在加载工作区…'
+                  : keyword || typeFilter !== 'all'
+                    ? '没有匹配的工作区'
+                    : '暂无工作区'
+              }
+              description={
+                isLoading && !data
+                  ? '正在读取租户快照。'
+                  : keyword || typeFilter !== 'all'
+                    ? '尝试调整搜索关键词或类型筛选。'
+                    : '当前环境没有可显示的工作区。'
+              }
             />
           ),
         }}
         pagination={{
+          current: page,
           pageSize,
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 个`,
-          onShowSizeChange: (_, size) => setPageSize(size),
+          onChange: (nextPage, nextSize) =>
+            setValues({ page: String(nextPage), size: String(nextSize) }),
         }}
         columns={[
           {
             title: '名称',
             dataIndex: 'name',
             ellipsis: true,
-            render: (v: string, record) => <a onClick={() => router.push(`/workspaces/${record.id}`)}>{v}</a>,
+            render: (v: string, record) => <Link href={`/workspaces/${record.id}`}>{v}</Link>,
           },
           {
             title: '类型',
             dataIndex: 'type',
             width: 90,
-            render: (v?: string) =>
-              v === 'Personal' ? <Tag>个人</Tag> : v === 'AdminWorkspace' ? <Tag color="purple">管理</Tag> : <Tag color="blue">工作区</Tag>,
+            render: (v?: string) => {
+              const meta = workspaceTypeMeta(v)
+              return <Tag color={meta.color}>{meta.label}</Tag>
+            },
           },
           {
             title: '状态',
             dataIndex: 'state',
             width: 90,
-            render: (v?: string) =>
-              v === 'Active' ? <Tag color="green">活跃</Tag> : v === 'Removing' ? <Tag color="red">删除中</Tag> : <Tag>{v ?? '-'}</Tag>,
+            render: (v?: string) => {
+              const meta = workspaceStateMeta(v)
+              return <Tag color={meta.color}>{meta.label}</Tag>
+            },
           },
           {
             title: '专用容量',

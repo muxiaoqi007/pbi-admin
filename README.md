@@ -17,7 +17,7 @@
 | 数据源视角 | 按「类型 + 服务器/路径/网址 + 数据库」聚合数据源并反查所有关联数据集，支持筛选、CSV 导出 |
 | 刷新 | 经典全量 / 增强全量 / 选表；支持处理类型、提交模式、并行度、重试、增量刷新策略与有效日期；批量刷新并发 3 |
 | 列表导出 | 工作区 / 报表 / 数据集列表导出 CSV（UTF-8 BOM） |
-| 访问保护 | 生产环境必须设置 `PBI_ADMIN_PASSWORD`；会话使用带过期时间的 HMAC 签名 HttpOnly Cookie |
+| 访问控制 | 当前版本不内置登录/密码；请部署在受控内网，或由反向代理 / VPN 提供认证 |
 | 凭据保护 | 设置 `PBI_CONFIG_ENCRYPTION_KEY` 后，`data/config.json` 中的 client secret / ROPC 密码使用 AES-256-GCM 加密 |
 
 租户数据快照在服务端缓存 5 分钟，避免重复扫描。
@@ -44,9 +44,9 @@ cp .env.example .env.local
 npm run dev
 ```
 
-开发环境可以不设置 `PBI_ADMIN_PASSWORD` 进行本机调试；**生产环境未配置该变量时服务会拒绝页面与 API 访问**。
+当前版本**不内置访问密码**。请勿把服务直接暴露到公网；生产部署应放在受控内网、VPN 或带认证的反向代理之后。
 
-首次使用进入「设置」页：新建租户环境（云环境 + 认证方式 + 凭据）→「保存并测试连接」。
+首次使用进入「设置」页：新建租户环境（云环境 + 认证方式 + 凭据）→「保存、设为当前并测试」。
 
 如果生产环境需要通过设置页保存凭据，还必须设置：
 
@@ -256,13 +256,16 @@ docker build -t pbi-admin .
 
 docker run -d -p 3000:3000 \
   -v pbi-admin-data:/app/data \
-  -e PBI_ADMIN_PASSWORD='替换为高强度管理密码' \
   -e PBI_CONFIG_ENCRYPTION_KEY='替换为独立高熵随机值' \
   --name pbi-admin \
   pbi-admin
 ```
 
 如果完全使用环境变量预置 Power BI 连接（`PBI_CLOUD` / `PBI_TENANT_ID` / `PBI_CLIENT_ID` / `PBI_CLIENT_SECRET`），可以不从设置页持久化 Power BI 凭据，此时 `PBI_CONFIG_ENCRYPTION_KEY` 不是必需的。
+
+## 安全边界
+
+本工具可以触发生产刷新并保存 Power BI 凭据，但**不内置用户认证与权限系统**。请只在受控内网或 VPN 中运行；如需跨网络访问，应在前置反向代理（Nginx / Ingress / API 网关）上配置认证、TLS 和访问日志，不要把服务直接暴露到公网。
 
 ## 工程检查
 

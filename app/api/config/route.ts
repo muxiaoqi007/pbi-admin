@@ -113,9 +113,11 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    let savedEnvId: string | undefined
     switch (body.action) {
       case 'save': {
         const saved = saveEnvironment(body.env ?? {})
+        savedEnvId = saved.id
         if (body.activate !== false) setActiveEnvironment(saved.id)
         invalidateToken()
         invalidatePbiCaches()
@@ -139,7 +141,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: '未知操作' }, { status: 400 })
     }
 
-    return NextResponse.json(configPayload(true))
+    return NextResponse.json({ ...configPayload(true), ...(savedEnvId ? { savedEnvId } : {}) })
   } catch (e) {
     return fail(e)
   }

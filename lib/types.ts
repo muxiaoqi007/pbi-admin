@@ -265,6 +265,44 @@ export interface DatasetSchema {
   columnCount: number
 }
 
+/** 刷新失败巡检：单个失败项 */
+export interface RefreshFailureItem {
+  datasetId: string
+  datasetName: string
+  workspaceName: string
+  workspaceId: string
+  startTime: string
+  endTime?: string
+  refreshType?: string
+  error?: string
+}
+
+/** 刷新失败巡检：未能完成检查的数据集 */
+export interface RefreshFailureScanError {
+  datasetId: string
+  datasetName: string
+  workspaceName: string
+  message: string
+}
+
+/**
+ * 刷新失败巡检结果。partial=true 表示存在未检查或取数失败的数据集，
+ * 此时 failures 不能代表“没有其他失败”。
+ */
+export interface RefreshFailureScan {
+  fetchedAt: string
+  attempted: number
+  scanned: number
+  failed: number
+  skipped: number
+  noHistory: number
+  partial: boolean
+  rateLimited: boolean
+  retryAfterSeconds?: number
+  failures: RefreshFailureItem[]
+  errors: RefreshFailureScanError[]
+}
+
 /** 前端展示用的扁平化视图 */
 export interface WorkspaceView {
   id: string

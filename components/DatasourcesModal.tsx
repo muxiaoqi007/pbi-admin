@@ -3,6 +3,7 @@
 import { Modal, Table, Tag, Tooltip } from 'antd'
 import useSWR from 'swr'
 import { fetcher } from '@/lib/client'
+import { responsiveModalWidth } from '@/lib/ui'
 import {
   CONNECTION_LABELS,
   DATASOURCE_TYPE_LABELS as TYPE_LABELS,
@@ -44,7 +45,7 @@ export default function DatasourcesModal({
       open={open}
       onCancel={onClose}
       footer={null}
-      width={760}
+      width={responsiveModalWidth(760)}
       title={`数据源 — ${datasetName ?? ''}`}
     >
       {!datasetId && <p>该数据集没有绑定的数据源信息。</p>}

@@ -18,6 +18,7 @@ import {
 } from 'antd'
 import type { Dayjs } from 'dayjs'
 import { postJSON } from '@/lib/client'
+import { responsiveModalWidth } from '@/lib/ui'
 import { useDatasetTables } from '@/lib/use-dataset-tables'
 import type { DatasetView } from '@/lib/types'
 
@@ -148,7 +149,7 @@ export default function RefreshModal({
       maskClosable={!submitting}
       keyboard={!submitting}
       title={`立即刷新 — ${dataset?.name ?? ''}`}
-      width={560}
+      width={responsiveModalWidth(560)}
       footer={[
         <Button key="cancel" onClick={onClose} disabled={submitting}>
           取消

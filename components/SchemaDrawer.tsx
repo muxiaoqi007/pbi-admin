@@ -4,6 +4,7 @@ import { Alert, Descriptions, Drawer, Table, Tabs, Tag } from 'antd'
 import useSWR from 'swr'
 import ErrorAlert from '@/components/ErrorAlert'
 import { fetcher } from '@/lib/client'
+import { responsiveDrawerWidth } from '@/lib/ui'
 import type { DatasetSchema, DatasetView, SchemaColumn, SchemaMeasure, SchemaTable } from '@/lib/types'
 
 /** 数据集结构抽屉：表 / 列 / 度量值 三 Tab（数据来自 getInfo Schema 扫描） */
@@ -26,7 +27,7 @@ export default function SchemaDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={860}
+      width={responsiveDrawerWidth(860)}
       title={`数据集结构 — ${dataset?.name ?? ''}`}
     >
       {error && <ErrorAlert error={error} />}

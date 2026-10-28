@@ -1,3 +1,4 @@
+import { parseRefreshError } from './domain/format'
 import type { PbiRefreshable, TenantSnapshot } from './types'
 
 export interface RefreshFailureLike {
@@ -63,19 +64,6 @@ function median(values: number[]): number | undefined {
   return sorted[middle]
 }
 
-function parseError(raw?: string): string | undefined {
-  if (!raw) return undefined
-  try {
-    const parsed = JSON.parse(raw) as {
-      error?: { message?: string }
-      message?: string
-    }
-    return parsed.error?.message ?? parsed.message ?? raw
-  } catch {
-    return raw
-  }
-}
-
 function durationSeconds(start?: string, end?: string, status?: string): number | undefined {
   if (!start) return undefined
   const startMs = Date.parse(start)
@@ -137,7 +125,7 @@ export function buildOpsHealth(
       baselineSeconds: baseline,
       durationRatio: ratio,
       durationOutlier: false,
-      error: parseError(refreshable.lastRefresh?.serviceExceptionJson) || failure?.error,
+      error: parseRefreshError(refreshable.lastRefresh?.serviceExceptionJson) || failure?.error,
     }
   })
 

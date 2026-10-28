@@ -13,19 +13,20 @@ import {
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import ErrorText from '@/components/ErrorText'
 import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
+import { useSnapshot } from '@/lib/use-snapshot'
 import {
   buildOpsHealth,
-  type RefreshFailureLike,
   type RefreshHealthItem,
   type WorkspaceHealthItem,
   type WorkspaceHealthState,
 } from '@/lib/ops-health'
-import type { PbiRefreshable, TenantSnapshot } from '@/lib/types'
+import type { PbiRefreshable, RefreshFailureScan } from '@/lib/types'
 
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return '-'
@@ -53,13 +54,7 @@ function workspaceStateMeta(state: WorkspaceHealthState) {
 }
 
 export default function OverviewPage() {
-  const {
-    data: snapshot,
-    error,
-    isLoading,
-    mutate,
-    isValidating,
-  } = useSWR<TenantSnapshot>('/api/snapshot', fetcher, { keepPreviousData: true })
+  const { data: snapshot, error, isLoading, mutate, isValidating } = useSnapshot()
 
   const memberMode = snapshot?.mode === 'member'
   const snapshotLoaded = Boolean(snapshot)
@@ -68,10 +63,16 @@ export default function OverviewPage() {
     error: failuresError,
     isValidating: failuresValidating,
     mutate: mutateFailures,
-  } = useSWR<{ failures: RefreshFailureLike[] }>(snapshotLoaded ? '/api/refresh-failures' : null, fetcher, {
+  } = useSWR<RefreshFailureScan>(snapshotLoaded ? '/api/refresh-failures' : null, fetcher, {
     revalidateOnFocus: false,
   })
   const failures = useMemo(() => failuresData?.failures ?? [], [failuresData])
+  const failurePartial = Boolean(failuresData?.partial)
+  const failureSkipped = failuresData?.skipped ?? 0
+  const failureAttempted = failuresData?.attempted ?? 0
+  const failureScanned = failuresData?.scanned ?? 0
+  const failureNoHistory = failuresData?.noHistory ?? 0
+  const failureInitialLoading = snapshotLoaded && failuresValidating && !failuresData
 
   const {
     data: refreshablesData,
@@ -178,9 +179,9 @@ export default function OverviewPage() {
             <Button icon={<ReloadOutlined />} loading={healthLoading} onClick={refreshAll}>
               刷新运维状态
             </Button>
-            <Link href="/refreshes">
-              <Button icon={<SyncOutlined />}>刷新监控</Button>
-            </Link>
+            <Button href="/refreshes" icon={<SyncOutlined />}>
+              刷新监控
+            </Button>
             <Button icon={<DownloadOutlined />} onClick={exportAll} disabled={!snapshot}>
               导出租户清单
             </Button>
@@ -191,20 +192,31 @@ export default function OverviewPage() {
       {error && !snapshot && <ErrorAlert error={error} onRetry={() => mutate()} />}
       {error && snapshot && <StaleDataAlert error={error} onRetry={() => mutate()} />}
 
-      {memberMode && snapshot && (
+      {failurePartial && (
         <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message={`成员模式：当前仅覆盖服务主体已加入的 ${snapshot.workspaces.length} 个工作区`}
+          message={`刷新巡检未完成：已检查 ${failureScanned}/${failureAttempted} 个可刷新数据集`}
           description={
             <>
-              <div>{snapshot.adminFallbackReason ?? '租户级 Admin API 当前不可用，已自动降级为成员模式。'}</div>
-              <div style={{ marginTop: 4 }}>
-                失败巡检仍可使用；全租户运行中状态、历史耗时基线与耗时离群识别需要 Admin API。
-              </div>
+              失败 {failures.length} 个，未检查 {failureSkipped} 个
+              {failuresData?.rateLimited
+                ? `（Power BI 限流${failuresData.retryAfterSeconds ? `，约 ${Math.ceil(failuresData.retryAfterSeconds / 60)} 分钟后可重试` : ''}）`
+                : '（取数失败）'}
+              。当前失败数可能偏低，请稍后重新巡检。
             </>
           }
+        />
+      )}
+
+      {failuresData && failureNoHistory > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`${failureNoHistory} 个可刷新数据集没有任何刷新记录`}
+          description="这些数据集无法判断最近一次刷新是否成功；请确认是否遗漏了刷新计划，或到数据集详情中手动刷新。"
         />
       )}
 
@@ -214,7 +226,7 @@ export default function OverviewPage() {
             <Statistic
               title="需处理工作区"
               value={health.affectedWorkspaceCount}
-              loading={isLoading}
+              loading={isLoading || failureInitialLoading}
               prefix={health.affectedWorkspaceCount > 0 ? <WarningOutlined /> : <CheckCircleOutlined />}
               valueStyle={health.affectedWorkspaceCount > 0 ? { color: '#cf1322' } : { color: '#389e0d' }}
             />
@@ -229,7 +241,9 @@ export default function OverviewPage() {
               loading={failuresValidating && !failuresData}
               valueStyle={health.failedCount > 0 ? { color: '#cf1322' } : undefined}
             />
-            <div className="metric-hint">最近一次刷新明确失败</div>
+            <div className="metric-hint">
+              {failurePartial ? '巡检未完成，数字可能偏低' : '最近一次刷新明确失败'}
+            </div>
           </Card>
         </Col>
         <Col xs={12} lg={6}>
@@ -286,8 +300,28 @@ export default function OverviewPage() {
         style={{ marginTop: 16 }}
         extra={
           <Space wrap>
-            <Tag color={health.actionableItems.length > 0 ? 'red' : 'green'}>
-              {health.actionableItems.length > 0 ? `待处理 ${health.actionableItems.length}` : '当前无明确异常'}
+            <Tag
+              color={
+                health.actionableItems.length > 0
+                  ? 'red'
+                  : failureInitialLoading
+                    ? 'processing'
+                    : failurePartial
+                      ? 'orange'
+                      : failureNoHistory > 0
+                        ? 'gold'
+                        : 'green'
+              }
+            >
+              {health.actionableItems.length > 0
+                ? `待处理 ${health.actionableItems.length}`
+                : failureInitialLoading
+                  ? '正在巡检…'
+                  : failurePartial
+                    ? '巡检未完成'
+                    : failureNoHistory > 0
+                      ? `${failureNoHistory} 个无刷新记录`
+                      : '当前无明确异常'}
             </Tag>
             <Button size="small" icon={<DownloadOutlined />} disabled={health.actionableItems.length === 0} onClick={exportIssues}>
               导出待处理
@@ -304,8 +338,24 @@ export default function OverviewPage() {
           locale={{
             emptyText: (
               <TableEmpty
-                title="当前没有明确待处理事项"
-                description={memberMode ? '成员模式下会列出可访问数据集的最近刷新失败。' : '刷新失败或耗时统计离群会出现在这里。'}
+                title={
+                  failureInitialLoading
+                    ? '正在巡检刷新状态…'
+                    : failurePartial
+                      ? '巡检未完成，无法确认没有异常'
+                      : '当前没有明确待处理事项'
+                }
+                description={
+                  failureInitialLoading
+                    ? '正在逐个检查可刷新数据集的最近记录，请稍候。'
+                    : failurePartial
+                      ? '部分数据集未能检查，请稍后重新巡检后再判断。'
+                      : failureNoHistory > 0
+                        ? `未发现明确失败，但另有 ${failureNoHistory} 个数据集没有刷新记录，无法判断。`
+                        : memberMode
+                          ? '成员模式下会列出可访问数据集的最近刷新失败。'
+                          : '刷新失败或耗时统计离群会出现在这里。'
+                }
               />
             ),
           }}
@@ -313,9 +363,16 @@ export default function OverviewPage() {
           columns={[
             {
               title: '问题',
-              width: 95,
-              render: (_: unknown, item) =>
-                item.status === 'Failed' ? <Tag color="red">刷新失败</Tag> : <Tag color="orange">耗时离群</Tag>,
+              width: 150,
+              render: (_: unknown, item) => {
+                const ageDays = item.startTime ? dayjs().diff(dayjs(item.startTime), 'day') : undefined
+                return (
+                  <Space size={4} wrap>
+                    {item.status === 'Failed' ? <Tag color="red">刷新失败</Tag> : <Tag color="orange">耗时离群</Tag>}
+                    {ageDays !== undefined && ageDays > 30 && <Tag>陈旧 {ageDays} 天</Tag>}
+                  </Space>
+                )
+              },
             },
             { title: '数据集 / 刷新项', dataIndex: 'name', ellipsis: true },
             { title: '工作区', dataIndex: 'workspaceName', width: 150, ellipsis: true, render: (value?: string) => value ?? '-' },
@@ -349,7 +406,7 @@ export default function OverviewPage() {
               ellipsis: { showTitle: false },
               render: (_: unknown, item) =>
                 item.error ? (
-                  <Tooltip title={item.error} placement="topLeft"><span className="text-error">{item.error}</span></Tooltip>
+                  <ErrorText text={item.error} />
                 ) : item.durationOutlier ? (
                   <span className="text-muted">当前耗时显著偏离租户同类比值分布</span>
                 ) : '-',
@@ -360,7 +417,7 @@ export default function OverviewPage() {
               fixed: 'right',
               render: (_: unknown, item) => (
                 <Space size={4}>
-                  <Link href={`/datasets?search=${encodeURIComponent(item.name)}`}>数据集</Link>
+                  <Link href={`/datasets?q=${encodeURIComponent(item.name)}`}>数据集</Link>
                   {item.workspaceId && <Link href={`/workspaces/${item.workspaceId}`}>工作区</Link>}
                 </Space>
               ),
@@ -378,7 +435,7 @@ export default function OverviewPage() {
         <Table<WorkspaceHealthItem>
           rowKey="workspaceId"
           size="small"
-          loading={isLoading}
+          loading={isLoading || failureInitialLoading}
           dataSource={health.workspaceHealth}
           scroll={{ x: 840 }}
           locale={{ emptyText: <TableEmpty title="暂无工作区" description="当前环境没有可显示的工作区。" /> }}

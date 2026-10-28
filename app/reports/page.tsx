@@ -1,32 +1,29 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { Button, Drawer, Input, Modal, Space, Table, Typography } from 'antd'
+import { useMemo } from 'react'
+import Link from 'next/link'
+import { Button, Input, Space, Table, Typography } from 'antd'
 import { DownloadOutlined, ExportOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
-import useSWR from 'swr'
 import dayjs from 'dayjs'
-import DatasourcesModal from '@/components/DatasourcesModal'
 import ErrorAlert from '@/components/ErrorAlert'
 import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
-import UsersTable from '@/components/UsersTable'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
-import type { PbiAdminUser, PbiReportPage, ReportView, TenantSnapshot } from '@/lib/types'
+import { useSnapshot } from '@/lib/use-snapshot'
+import { useUrlState } from '@/lib/use-url-state'
+import type { ReportView } from '@/lib/types'
+
+const FILTER_DEFAULTS = { q: '', page: '1', size: '20' }
 
 export default function ReportsPage() {
-  const [keyword, setKeyword] = useState('')
-  const [pageSize, setPageSize] = useState(20)
-  const [usersReport, setUsersReport] = useState<ReportView | null>(null)
-  const [datasourceReport, setDatasourceReport] = useState<ReportView | null>(null)
-  const [pagesReport, setPagesReport] = useState<ReportView | null>(null)
+  const { values, setValues } = useUrlState(FILTER_DEFAULTS)
+  const keyword = values.q
+  const page = Math.max(1, Number(values.page) || 1)
+  const pageSize = Math.max(1, Number(values.size) || 20)
 
-  const { data, error, isLoading, mutate, isValidating } = useSWR<TenantSnapshot>(
-    '/api/snapshot',
-    fetcher,
-    { keepPreviousData: true },
-  )
+  const { data, error, isLoading, mutate, isValidating } = useSnapshot()
 
   const datasetNameById = useMemo(() => {
     const m = new Map<string, string>()
@@ -44,19 +41,6 @@ export default function ReportsPage() {
         (r.datasetId ? datasetNameById.get(r.datasetId)?.toLowerCase().includes(k) : false),
     )
   }, [data, keyword, datasetNameById])
-
-  const { data: usersData, error: usersError, isLoading: usersLoading } = useSWR<{
-    users: PbiAdminUser[]
-  }>(usersReport ? `/api/reports/${usersReport.id}/users` : null, fetcher)
-
-  const { data: pagesData, error: pagesError, isLoading: pagesLoading } = useSWR<{
-    pages: PbiReportPage[]
-  }>(pagesReport ? `/api/reports/pages?wid=${pagesReport.workspaceId}&rid=${pagesReport.id}` : null, fetcher)
-
-  const datasourceDataset = useMemo(
-    () => data?.datasets.find((d) => d.id === datasourceReport?.datasetId),
-    [data, datasourceReport],
-  )
 
   function doExport() {
     exportCSV(
@@ -104,10 +88,14 @@ export default function ReportsPage() {
           placeholder="搜索报表名称 / 工作区 / 数据集"
           style={{ width: 360, maxWidth: '100%' }}
           value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          onChange={(e) => setValues({ q: e.target.value, page: '1' })}
         />
         <span className="filter-summary">
-          {keyword ? `筛选后 ${filtered.length} / ${data?.reports.length ?? 0} 张报表` : `共 ${filtered.length} 张报表`}
+          {isLoading && !data
+            ? '正在加载报表…'
+            : keyword
+              ? `筛选后 ${filtered.length} / ${data?.reports.length ?? 0} 张报表`
+              : `共 ${filtered.length} 张报表`}
         </span>
       </div>
 
@@ -119,26 +107,51 @@ export default function ReportsPage() {
         locale={{
           emptyText: (
             <TableEmpty
-              title={keyword ? '没有匹配的报表' : '暂无报表'}
-              description={keyword ? '尝试搜索其他报表、工作区或数据集名称。' : '当前环境没有可显示的报表。'}
+              title={
+                isLoading && !data ? '正在加载报表…' : keyword ? '没有匹配的报表' : '暂无报表'
+              }
+              description={
+                isLoading && !data
+                  ? '正在读取租户快照。'
+                  : keyword
+                    ? '尝试搜索其他报表、工作区或数据集名称。'
+                    : '当前环境没有可显示的报表。'
+              }
             />
           ),
         }}
         pagination={{
+          current: page,
           pageSize,
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 张`,
-          onShowSizeChange: (_, size) => setPageSize(size),
+          onChange: (nextPage, nextSize) =>
+            setValues({ page: String(nextPage), size: String(nextSize) }),
         }}
         columns={[
-          { title: '报表', dataIndex: 'name', ellipsis: true },
-          { title: '工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },
+          {
+            title: '报表',
+            dataIndex: 'name',
+            ellipsis: true,
+            render: (value: string, record) => <Link href={`/reports/${record.id}`}>{value}</Link>,
+          },
+          {
+            title: '工作区',
+            dataIndex: 'workspaceName',
+            width: 180,
+            ellipsis: true,
+            render: (v: string, r) => <Link href={`/workspaces/${r.workspaceId}`}>{v}</Link>,
+          },
           {
             title: '数据集',
             dataIndex: 'datasetId',
             width: 180,
             ellipsis: true,
-            render: (v?: string) => (v ? datasetNameById.get(v) ?? v : <span className="text-muted">未绑定</span>),
+            render: (v?: string) => {
+              if (!v) return <span className="text-muted">未绑定</span>
+              const name = datasetNameById.get(v) ?? v
+              return <Link href={`/datasets?q=${encodeURIComponent(name)}`}>{name}</Link>
+            },
           },
           {
             title: '修改时间',
@@ -148,17 +161,11 @@ export default function ReportsPage() {
           },
           {
             title: '操作',
-            width: 260,
+            width: 160,
             fixed: 'right',
             render: (_: unknown, r) => (
               <Space size={10}>
-                <a onClick={() => setUsersReport(r)}>用户</a>
-                <a onClick={() => setPagesReport(r)}>页面</a>
-                {r.datasetId ? (
-                  <a onClick={() => setDatasourceReport(r)}>数据源</a>
-                ) : (
-                  <Typography.Text type="secondary">数据源</Typography.Text>
-                )}
+                <Link href={`/reports/${r.id}`}>详情</Link>
                 {r.webUrl ? (
                   <Typography.Link href={r.webUrl} target="_blank">
                     <Space size={2}>打开 <ExportOutlined /></Space>
@@ -171,46 +178,6 @@ export default function ReportsPage() {
           },
         ]}
       />
-
-      <Drawer
-        open={!!usersReport}
-        onClose={() => setUsersReport(null)}
-        width={680}
-        title={`报表用户 — ${usersReport?.name ?? ''}`}
-      >
-        {usersError && <ErrorAlert error={usersError} />}
-        <UsersTable users={usersData?.users ?? []} loading={usersLoading} />
-      </Drawer>
-
-      <DatasourcesModal
-        open={!!datasourceReport}
-        onClose={() => setDatasourceReport(null)}
-        datasetId={datasourceReport?.datasetId}
-        datasetName={datasourceDataset?.name ?? datasourceReport?.datasetId ?? '（报表未绑定数据集）'}
-        workspaceId={datasourceDataset?.workspaceId ?? datasourceReport?.workspaceId}
-      />
-
-      <Modal
-        open={!!pagesReport}
-        onCancel={() => setPagesReport(null)}
-        footer={null}
-        width={620}
-        title={`报表页面 — ${pagesReport?.name ?? ''}（共 ${pagesData?.pages?.length ?? 0} 页）`}
-      >
-        {pagesError && <ErrorAlert error={pagesError} />}
-        <Table
-          rowKey={(p, i) => `${p.name ?? i}`}
-          size="small"
-          loading={pagesLoading}
-          dataSource={pagesData?.pages ?? []}
-          pagination={false}
-          locale={{ emptyText: <TableEmpty title="暂无页面信息" description="当前报表没有返回可显示的页面。" /> }}
-          columns={[
-            { title: '序号', dataIndex: 'order', width: 60, render: (v?: number) => v ?? '-' },
-            { title: '页面名称', dataIndex: 'displayName', ellipsis: true, render: (v?: string) => v ?? '-' },
-          ]}
-        />
-      </Modal>
     </div>
   )
 }

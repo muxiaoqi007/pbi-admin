@@ -1,22 +1,30 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Alert, Button, Input, Select, Table, Tag, Tooltip } from 'antd'
+import { Alert, Button, Input, Modal, Select, Table, Tag, Tooltip } from 'antd'
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import ErrorAlert from '@/components/ErrorAlert'
+import ErrorText from '@/components/ErrorText'
 import PageHeader from '@/components/PageHeader'
 import StaleDataAlert from '@/components/StaleDataAlert'
 import TableEmpty from '@/components/TableEmpty'
 import { fetcher } from '@/lib/client'
 import { exportCSV } from '@/lib/export'
+import { useUrlState } from '@/lib/use-url-state'
+import { responsiveModalWidth } from '@/lib/ui'
 import { DATASOURCE_TYPE_LABELS, type DatasourceIndex, type DatasourceIndexItem } from '@/lib/types'
 
+const FILTER_DEFAULTS = { q: '', type: '', page: '1', size: '20' }
+
 export default function DatasourcesPage() {
-  const [keyword, setKeyword] = useState('')
-  const [typeFilter, setTypeFilter] = useState<string | undefined>()
-  const [pageSize, setPageSize] = useState(20)
+  const { values, setValues } = useUrlState(FILTER_DEFAULTS)
+  const keyword = values.q
+  const typeFilter = values.type || undefined
+  const page = Math.max(1, Number(values.page) || 1)
+  const pageSize = Math.max(1, Number(values.size) || 20)
+  const [errorsOpen, setErrorsOpen] = useState(false)
 
   const { data, error, isLoading, mutate, isValidating } = useSWR<DatasourceIndex>(
     '/api/datasources',
@@ -69,9 +77,20 @@ export default function DatasourcesPage() {
       <PageHeader
         title="数据源"
         description="从连接端点反查所有关联数据集，用于改密码、迁移、网关故障与连接变更前的影响分析。"
-        meta={data ? `最近扫描：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')} · 缓存 10 分钟` : undefined}
+        meta={
+          data
+            ? `最近扫描：${dayjs(data.fetchedAt).format('YYYY-MM-DD HH:mm:ss')} · 成功 ${data.scanned}/${data.attempted}${data.failed > 0 ? ` · 失败 ${data.failed}` : ''} · 缓存 10 分钟`
+            : isLoading
+              ? '正在扫描数据源…'
+              : undefined
+        }
         actions={
           <>
+            {data && data.failed > 0 && (
+              <Button danger onClick={() => setErrorsOpen(true)}>
+                失败数据集（{data.failed}）
+              </Button>
+            )}
             <Button
               icon={<ReloadOutlined />}
               loading={isValidating}
@@ -95,6 +114,21 @@ export default function DatasourcesPage() {
         />
       )}
 
+      {data && data.failed > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`数据源扫描未完成：成功 ${data.scanned}/${data.attempted}，失败 ${data.failed}`}
+          description="失败的数据集没有被纳入下方影响分析；请先查看失败明细，稍后重试扫描。"
+          action={
+            <Button size="small" onClick={() => setErrorsOpen(true)}>
+              查看失败明细
+            </Button>
+          }
+        />
+      )}
+
       <Alert
         type="info"
         showIcon
@@ -110,18 +144,22 @@ export default function DatasourcesPage() {
           placeholder="搜索连接地址 / 数据库 / 数据集名"
           style={{ width: 340, maxWidth: '100%' }}
           value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          onChange={(e) => setValues({ q: e.target.value, page: '1' })}
         />
         <Select
           allowClear
           placeholder="全部类型"
           style={{ width: 200, maxWidth: '100%' }}
           value={typeFilter}
-          onChange={setTypeFilter}
+          onChange={(value) => setValues({ type: value ?? '', page: '1' })}
           options={typeOptions}
         />
         <span className="filter-summary">
-          {keyword || typeFilter ? `筛选后 ${filtered.length} / ${data?.items.length ?? 0} 个数据源` : `共 ${filtered.length} 个数据源`}
+          {isLoading && !data
+            ? '正在扫描数据源…'
+            : keyword || typeFilter
+              ? `筛选后 ${filtered.length} / ${data?.items.length ?? 0} 个数据源`
+              : `共 ${filtered.length} 个数据源`}
         </span>
       </div>
 
@@ -133,16 +171,30 @@ export default function DatasourcesPage() {
         locale={{
           emptyText: (
             <TableEmpty
-              title={keyword || typeFilter ? '没有匹配的数据源' : '暂无数据源'}
-              description={keyword || typeFilter ? '调整关键词或类型筛选后再试。' : '当前环境尚未扫描到可显示的数据源。'}
+              title={
+                isLoading && !data
+                  ? '正在扫描数据源…'
+                  : keyword || typeFilter
+                    ? '没有匹配的数据源'
+                    : '暂无数据源'
+              }
+              description={
+                isLoading && !data
+                  ? '首次扫描需要逐个读取数据集的数据源，可能需要几十秒到一分钟。'
+                  : keyword || typeFilter
+                    ? '调整关键词或类型筛选后再试。'
+                    : '当前环境尚未扫描到可显示的数据源。'
+              }
             />
           ),
         }}
         pagination={{
+          current: page,
           pageSize,
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 个`,
-          onShowSizeChange: (_, size) => setPageSize(size),
+          onChange: (nextPage, nextSize) =>
+            setValues({ page: String(nextPage), size: String(nextSize) }),
         }}
         expandable={{
           expandedRowRender: (i) => (
@@ -194,6 +246,37 @@ export default function DatasourcesPage() {
           },
         ]}
       />
+
+      <Modal
+        open={errorsOpen}
+        onCancel={() => setErrorsOpen(false)}
+        footer={null}
+        width={responsiveModalWidth(760)}
+        title={`扫描失败的数据集（${data?.failed ?? 0}）`}
+      >
+        <Table
+          rowKey={(error) => error.datasetId}
+          size="small"
+          dataSource={data?.errors ?? []}
+          pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 个` }}
+          locale={{ emptyText: <TableEmpty title="没有失败明细" /> }}
+          columns={[
+            { title: '数据集', dataIndex: 'datasetName', ellipsis: true },
+            { title: '工作区', dataIndex: 'workspaceName', width: 180, ellipsis: true },
+            {
+              title: '错误',
+              dataIndex: 'message',
+              ellipsis: { showTitle: false },
+              render: (value: string) => <ErrorText text={value} />,
+            },
+          ]}
+        />
+        {(data?.failed ?? 0) > (data?.errors.length ?? 0) && (
+          <p className="text-muted" style={{ marginTop: 8 }}>
+            仅显示前 {data?.errors.length} 条失败明细。
+          </p>
+        )}
+      </Modal>
     </div>
   )
 }

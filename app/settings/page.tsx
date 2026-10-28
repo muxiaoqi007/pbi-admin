@@ -14,6 +14,7 @@ import {
   Popconfirm,
   Radio,
   Space,
+  Switch,
   Tag,
   Typography,
 } from 'antd'
@@ -58,6 +59,7 @@ interface ConfigSecurity {
 
 interface ConfigResponse {
   activeEnvId?: string
+  savedEnvId?: string
   environments: MaskedEnv[]
   activeEnv: MaskedEnv | null
   security: ConfigSecurity
@@ -159,6 +161,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [dirty, setDirty] = useState(false)
+  const [activateAfterSave, setActivateAfterSave] = useState(true)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
 
@@ -257,7 +260,7 @@ export default function SettingsPage() {
     }
   }
 
-  async function persist(thenTest: boolean) {
+  async function persist(thenTest: boolean, activate = activateAfterSave) {
     let values: FormValues
     try {
       values = await form.validateFields()
@@ -265,18 +268,21 @@ export default function SettingsPage() {
       return
     }
 
+    // 测试连接只能针对当前激活环境，因此“保存并测试”始终会切换。
+    const shouldActivate = thenTest ? true : activate
     setSaving(true)
     setTestResult(null)
     setTestError(null)
     try {
       const saved = await postJSON<ConfigResponse & { ok: boolean }>('/api/config', {
         action: 'save',
+        activate: shouldActivate,
         env: { ...values, id: isNew ? undefined : selectedId },
       })
       await mutate(saved, { revalidate: false })
-      setSelectedId(saved.activeEnvId ?? selectedId)
+      setSelectedId(saved.savedEnvId ?? saved.activeEnvId ?? selectedId)
       setDirty(false)
-      message.success('环境已保存并设为当前使用')
+      message.success(shouldActivate ? '环境已保存并设为当前使用' : '环境已保存（未切换当前环境）')
       if (thenTest) await runConnectionTest()
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e))
@@ -563,12 +569,23 @@ export default function SettingsPage() {
                   ]}
                 />
 
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Switch
+                    checked={activateAfterSave}
+                    onChange={setActivateAfterSave}
+                    disabled={saving || testing}
+                  />
+                  <span>保存后设为当前环境</span>
+                </div>
+                <p className="text-muted" style={{ margin: '4px 0 0' }}>
+                  关闭后只保存配置，不切换全站当前环境；测试连接需要切换当前环境。
+                </p>
                 <Space style={{ marginTop: 8 }} wrap>
                   <Button type="primary" loading={saving && !testing} onClick={() => persist(false)}>
-                    保存并使用
+                    {activateAfterSave ? '保存并设为当前' : '仅保存'}
                   </Button>
-                  <Button loading={saving || testing} onClick={() => persist(true)}>
-                    {testing ? '正在测试连接…' : '保存并测试连接'}
+                  <Button loading={saving || testing} onClick={() => persist(true, true)}>
+                    {testing ? '正在测试连接…' : '保存、设为当前并测试'}
                   </Button>
                   <Typography.Link href={preset.portal} target="_blank">
                     打开当前云应用注册门户
